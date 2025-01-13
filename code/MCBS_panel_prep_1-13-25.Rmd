@@ -1,0 +1,1001 @@
+---
+title: "MCBS Panel Preparation 1-13-25"
+author: "Nicklas Klepser"
+date: "2025-1-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r , echo=FALSE, message=FALSE}
+library(Matrix)
+library(RODBC)
+library(epitools)
+library(dsrTest)
+library(knitr)
+library(rvest)
+library(readxl)
+library(stringdist)
+library(dplyr)
+library(writexl)
+library(reshape)
+library(survival)
+library(mstate)
+library(foreign)
+library(haven)
+library(ggplot2)
+library(mosaic)
+library(lessR)
+library(sjlabelled)
+library(rlang)
+library(tidyverse)
+library(survey)
+library(gtsummary)
+library(utils)
+library(tidyr)
+library(rms)
+library(skimr)
+library(janitor)
+```
+
+```{r}
+#create target drug lists for GLP1RA and SGLT2i
+  GLP1RA_generics_list<- list("Lixisenatide","Liraglutide", "Semaglutide", "Exenatide", "Albiglutide", "Dulaglutide", "Efpeglenatide", "INSULIN GLARGINE/LIXISENATIDE", "EXENATIDE MICROSPHERES", "insulin degludec/liraglutide", "SEMAGLUTIDE SITAGLIPTIN PHOS/METFORMIN")
+GLP1RA_genericsupper<-lapply(GLP1RA_generics_list, toupper)
+GLP1RA_genericslower<-lapply(GLP1RA_generics_list, tolower)
+GLP1RA_generics<- c(GLP1RA_genericslower, GLP1RA_genericsupper)
+
+SGLT2i_generics_list<- list("Empagliflozin", "Dapagliflozin",  "dapagliflozin/metformin HCl", "DAPAGLIFLOZIN PROPANEDIOL", "Canagliflozin", "canagliflozin/metformin HCl" ,"Ertugliflozin", "Sotagliflozin", "EMPAGLIFLOZIN/LINAGLIPTIN", "empagliflozin/metformin HCl", "ertugliflozin pidolate")
+SGLT2i_genericsupper<-lapply(SGLT2i_generics_list, toupper)
+SGLT2i_genericslower<-lapply(SGLT2i_generics_list, tolower)
+SGLT2i_generics<- c(SGLT2i_genericslower, SGLT2i_genericsupper)
+```
+
+# Part 1: Baseline Survey Data Preparation
+```{r}
+#read in the data files, and select and join variables of interest in from the survey file for the baseline 
+
+analyze_survey_panel<- function(panel){
+
+admin_util_smry_1<- as.data.frame(read_sas('admnutls.sas7bdat'))
+admin_util_smry<- admin_util_smry_1 %>% select ( "BASEID") #include measures of health care utilization...person summary from cost might be better for this 
+
+demo_vars<-c("H_AGE","H_DOB", "H_CENSUS", "SPDEGRCV", "H_SEX", "D_DOD", "H_DOD", "H_RACE", "SPMARSTA", "PANEL", "SURVEYYR", "INCOME_H", "IPR_IND", "IPR" ,"INCSRCE", "INCOME", "BASEID")
+demographics_1<-as.data.frame(read_sas('demo.sas7bdat')) #demographic variables
+demographics<- demographics_1 %>% select(any_of(demo_vars)) 
+
+chronic_conditions_1<-as.data.frame(read_sas('chrncond.sas7bdat'))
+chronic_conditions <- chronic_conditions_1 %>%
+   select("OCBETES", "D_OCDTYP", "OCDVISIT", "BASEID", "OCMYOCAR", "OCCHD", "OCSTROKE", "OCCFAIL" , "OCARTERY", "OCDEMENT", "OCEMPHYS", "OCARTHRH", "OCPPARAL", "OCCANCER", "OCCBLOOD", "OCCLEUK", "OCCLYMPH", "OCHBP") #include co-morbidities... use [Charlson comorbid. index] 
+
+chronic_conditionflag_1<- as.data.frame(read_sas('chrncdfl.sas7bdat'))
+chronic_conditionflag <- chronic_conditionflag_1 %>% #include co-morbidities
+   select("DIABETES" , "DIABTESE", "BASEID", "STRKETIA", "ISCHMCHT", "CHF", "COPD", "ALZHDMTA", "CHRNKIDN" , "HIVAIDS", "LEUKLYMP", "HYPERT")
+
+diabetes_1<- as.data.frame(read_sas('diabetes.sas7bdat'))
+diabetes<- diabetes_1 %>% select("DIAAGE" ,"BASEID", "DIAKDPEV", "DIACTRLD")
+#"DIANEURO", "DIAKIDNY" not avail starting in 2019
+#DIAKDPEV could be an option 
+
+genhealth_1<- as.data.frame(read_sas('genhlth.sas7bdat'))
+genhealth<- genhealth_1 %>% select("GENHELTH", "HEIGHTIN", "HEIGHTFT", "WEIGHT", "BASEID")
+
+hisumry_1<- as.data.frame(read_sas('hisumry.sas7bdat'))
+hisumry<- hisumry_1 %>% select("H_MCSW", "H_MEDSTA" ,"BASEID", "H_OPMDCD", "H_DUAL12","H_PDLS12") #medicare coverage and type needs to be included as well
+
+nagi_diability_1<- as.data.frame(read_sas('nagidis.sas7bdat')) 
+nagi_diability<- nagi_diability_1 %>% select ( "BASEID", "HPPDBATH", "HPPDDRES", "HPPDEAT", "HPPDCHAR", "HPPDWALK", "HPPDTOIL", "PRBTELE", "PRBLHWK", "PRBHHWK", "PRBMEAL", "PRBSHOP", "PRBBILS", "DIFSTOOP", "DIFLIFT", "DIFREACH", "DIFWRITE", "DIFWALK" ) 
+
+nico_alch_1<- as.data.frame(read_sas('nicoalco.sas7bdat'))
+nico_alch<- nico_alch_1 %>% select("BASEID", "CIG100", "CIGNOW", "ALCDAY", "ALCNDAYU","ALPERDAY", "ALC12MN", "ALC12MNU")
+  
+residence_timeline_1<-  as.data.frame(read_sas('restmln.sas7bdat'))
+residence_timeline<- residence_timeline_1 %>% select ("BASEID" , "D_TYPE", "D_IDAYS") #"D_CDAYS", "D_FDAYS" become “D_TCDAYS”  and “D_TFDAYS”  #community vs facility
+    
+satisfaction_w_care_1<-as.data.frame(read_sas('satwcare.sas7bdat'))
+satisfaction_w_care<- satisfaction_w_care_1 %>% select ("BASEID" )#not sure if needed
+
+source_of_care_1<-as.data.frame(read_sas('uscare.sas7bdat'))
+source_of_care<- source_of_care_1 %>% select ("BASEID" ) #health beliefs.. not sure if needed 
+
+medicare_plan_knowledge_1<-as.data.frame(read_sas('mcreplnq.sas7bdat'))
+medicare_plan_knowledge<- medicare_plan_knowledge_1 %>% select ("BASEID", "KCARKNOW") #health beliefs
+
+preventative_care_1<- as.data.frame(read_sas('prevcare.sas7bdat'))
+preventative_care<- preventative_care_1 %>% select ("BASEID", "FLUSHOT" ) #health beliefs
+
+vision_hearing_vars<- c("BASEID", "ERETINOP", "RETINEVR"  )
+vision_hearing_1<- as.data.frame(read_sas('vishear.sas7bdat'))
+vision_hearing<- vision_hearing_1 %>% select (any_of(vision_hearing_vars) )
+
+medicare_advantage_1<- as.data.frame(read_sas('maplanqx.sas7bdat'))
+medicare_advantage<- medicare_advantage_1 %>% select("BASEID" , "D_MADV")
+
+initial_sas_file <- 'rxpartd.sas7bdat'
+alternative_sas_file <- 'rxmed.sas7bdat'
+
+# Attempt to read the initial SAS file
+partd <- tryCatch(as.data.frame(read_sas(initial_sas_file) %>% select("BASEID", "H_PARTD")), error = function(e) NULL)
+
+# Check if the read was successful
+if (is.null(partd) && file.exists(alternative_sas_file)) {
+  # If the initial file is not found, attempt to read the alternative file
+  partd <- as.data.frame(read_sas(alternative_sas_file) %>% select("BASEID", "H_PARTD"))
+}
+# Use partd for further processing if it's not NULL
+if (!is.null(partd)) {
+  # Your further processing with the partd data frame
+  print(partd)
+}
+
+#joining all the survey files for 2015 panel baseline
+a1<- left_join(demographics, chronic_conditions, by=NULL, copy=FALSE)
+a2<- left_join(a1, chronic_conditionflag, by=NULL, copy=FALSE)
+a3<- left_join(a2, admin_util_smry, by=NULL, copy=FALSE)
+a4<- left_join(a3, preventative_care, by=NULL, copy=FALSE)
+a5<- left_join(a4, medicare_plan_knowledge, by=NULL, copy=FALSE)
+a6<- left_join(a5, source_of_care, by=NULL, copy=FALSE)
+a7<- left_join(a6, satisfaction_w_care, by=NULL, copy=FALSE)
+a8<- left_join(a7, residence_timeline, by=NULL, copy=FALSE)
+a9<- left_join(a8, nico_alch, by=NULL, copy=FALSE)
+a10<- left_join(a9, nagi_diability, by=NULL, copy=FALSE)
+a11<- left_join(a10, hisumry, by=NULL, copy=FALSE)
+a12<- left_join(a11, genhealth, by=NULL, copy=FALSE)
+a13<- left_join(a12, vision_hearing, by=NULL, copy=FALSE)
+a14<- left_join(a13, partd, by=NULL, copy=FALSE)
+a15<- left_join(a14, medicare_advantage, by=NULL, copy=FALSE)
+survey_data<- left_join(a15, diabetes, by=NULL, copy=FALSE)
+survey_data<- subset(survey_data, PANEL %in% c(panel_number_survey)) }
+```
+
+```{r}
+#add or subtract years based on the length of your analysis
+survey_directories_BL <- c(
+  "H:/MCBS/Survey File 2016/Data/SAS Files",
+  "H:/MCBS/Survey File 2017/Data/SAS Files",
+  "H:/MCBS/Survey File 2018/Data/SAS Files",
+  "H:/MCBS/Survey File 2019/Data/SAS Files",
+  "H:/MCBS/Survey File 2020/Data/SAS Files",
+  "H:/MCBS/Survey File 2021/Data/SAS Files"
+)
+```
+
+```{r, message=FALSE, warning=FALSE}
+#iterate through the survey baseline directories, and read in and join the variables using the previously defined function 
+
+all_panel_data <- list()
+
+year_survey <- 2016
+panel_number_survey <- 2015
+
+for (panel in survey_directories_BL) {
+  setwd(panel)
+  panel_data <- analyze_survey_panel(year_survey)
+  
+  # Append the panel data to the list
+  all_panel_data[[panel_number_survey]] <- panel_data
+  
+  year_survey <- year_survey + 1
+  panel_number_survey <- panel_number_survey + 1
+}
+```
+
+```{r}
+#bind each year's baseline survey data together into a single baseline survey file encompassing all years of interest
+BL_survey_totalpop_1<-bind_rows(all_panel_data[2015], all_panel_data[2016], all_panel_data[2017], all_panel_data[2018],all_panel_data[2019])
+
+#create a dummy variable for countng the population later,
+BL_survey_totalpop_1$dummy<- 1
+```
+
+```{r}
+BL_survey_totalpop_1$DIACTRLD<-  ifelse(BL_survey_totalpop_1$DIACTRLD %in% c("D",".", "R"), NA, BL_survey_totalpop_1$DIACTRLD)
+ #CHECK
+ BL_survey_totalpop_1Glycemic_control<- factor(BL_survey_totalpop_1$DIACTRLD, levels= c(1,2,3,4,5))
+ BL_survey_totalpop_1$Glycemic_control_numeric <- as.numeric(BL_survey_totalpop_1Glycemic_control)
+```
+
+```{r}
+# Recode D_TYPE variable
+BL_survey_totalpop_1$D_TYPE <- ifelse(BL_survey_totalpop_1$D_TYPE %in% c("C"), 1, 
+                                    ifelse(BL_survey_totalpop_1$D_TYPE %in% c("F", "B"), 0, NA))
+# Convert D_TYPE to factor
+BL_survey_totalpop_1$Care_Setting <- factor(BL_survey_totalpop_1$D_TYPE, levels = c(1, 0), labels = c("C", "F/B"))
+
+# Print the levels and class of the D_TYPE variable
+print(levels(BL_survey_totalpop_1$Care_Setting))
+print(class(BL_survey_totalpop_1$Care_Setting))
+```
+
+```{r}
+#Adjust this depending on how many years of data you have. "2020" should be your second to last year of data. 
+BL_survey_totalpop_1$Panel_factor <- factor(BL_survey_totalpop_1$PANEL)
+summary(BL_survey_totalpop_1$Panel_factor)
+```
+
+```{r}
+# income-to- poverty ratio (IPR) versus IPR_IND ... IPR is a continuous variable in the most recent years
+table(BL_survey_totalpop_1$IPR_IND)
+summary(BL_survey_totalpop_1$IPR)
+
+BL_survey_totalpop_1$IPR <- ifelse(BL_survey_totalpop_1$IPR <= 1.0, 1,
+                                ifelse(BL_survey_totalpop_1$IPR > 1.0 & BL_survey_totalpop_1$IPR <= 1.2, 2,
+                                ifelse(BL_survey_totalpop_1$IPR > 1.2 & BL_survey_totalpop_1$IPR <= 1.35, 3,
+                                ifelse(BL_survey_totalpop_1$IPR > 1.35 & BL_survey_totalpop_1$IPR <= 2.00, 4,
+                                ifelse(BL_survey_totalpop_1$IPR > 2.0, 5, NA)))))
+
+table(BL_survey_totalpop_1$IPR)
+
+BL_survey_totalpop_1 <- BL_survey_totalpop_1 %>%
+  mutate(IPR_final = coalesce(IPR, IPR_IND))
+
+BL_survey_totalpop_1$IPR_final_cat<-factor(BL_survey_totalpop_1$IPR_final, levels= c(1,2,3,4,5))
+```
+
+### read in variables which haves names that change over the years 
+```{r}
+#urban/rural
+setwd("H:/MCBS/Survey File 2016/Data/SAS Files")
+demographics_1<-as.data.frame(read_sas('demo.sas7bdat')) #demographic variables
+demographics_2015<- demographics_1 %>% select("H_URBRUR", "BASEID")
+demographics_2015$Metro<-demographics_2015$H_URBRUR
+
+setwd("H:/MCBS/Survey File 2017/Data/SAS Files")
+demographics_1<-as.data.frame(read_sas('demo.sas7bdat')) #demographic variables
+demographics_2016<- demographics_1 %>% select("H_CBSA", "BASEID")
+demographics_2016$Metro<-demographics_2016$H_CBSA
+
+setwd("H:/MCBS/Survey File 2018/Data/SAS Files")
+demographics_1<-as.data.frame(read_sas('demo.sas7bdat')) #demographic variables
+demographics_2017<- demographics_1 %>% select("H_CBSA", "BASEID")
+demographics_2017$Metro<-demographics_2017$H_CBSA
+
+setwd("H:/MCBS/Survey File 2019/Data/SAS Files")
+demographics_1<-as.data.frame(read_sas('demo.sas7bdat')) #demographic variables
+demographics_2018<- demographics_1 %>% select("H_CBSA", "BASEID")
+demographics_2018$Metro<-demographics_2018$H_CBSA
+
+setwd("H:/MCBS/Survey File 2020/Data/SAS Files")
+demographics_1<-as.data.frame(read_sas('demo.sas7bdat')) #demographic variables
+demographics_2019<- demographics_1 %>% select("H_CBSA", "BASEID")
+demographics_2019$Metro<-demographics_2019$H_CBSA
+
+setwd("H:/MCBS/Survey File 2021/Data/SAS Files")
+demographics_1<-as.data.frame(read_sas('demo.sas7bdat')) #demographic variables
+demographics_2020<- demographics_1 %>% select("H_CBSA", "BASEID")
+demographics_2020$Metro<-demographics_2020$H_CBSA
+
+Metro<-bind_rows(demographics_2015,demographics_2016,demographics_2017,demographics_2018, demographics_2019, demographics_2020)
+Metro_filtered <- Metro %>%
+  distinct(BASEID, .keep_all = TRUE)
+
+BL_survey_totalpop_2<- left_join(BL_survey_totalpop_1, Metro_filtered)
+
+non_metro<- c("Rural","Micro", "Non-CBSA" )
+
+# Assign values to Metro_NonMet based on the Metro column
+BL_survey_totalpop_2$Metro_NonMet <- ifelse(BL_survey_totalpop_2$Metro %in% non_metro, "Non-Metro", "Metro")
+
+# Convert Metro_NonMet to a factor with specified levels
+BL_survey_totalpop_2$Metro_NonMet <- factor(BL_survey_totalpop_2$Metro_NonMet, levels = c("Metro", "Non-Metro"))
+
+# Check the table with NA values included
+table(BL_survey_totalpop_2$Metro_NonMet, useNA = "always")
+```
+```{r}
+setwd("H:/MCBS/Survey File 2016/Data/SAS Files")
+nico_alch_1<- as.data.frame(read_sas('nicoalco.sas7bdat'))
+nico_alch_2015<- nico_alch_1 %>% select("BASEID","ALCLIFE", "ALCYEAR")
+
+nico_alch_2015$ever_drinker<-ifelse(nico_alch_2015$ALCYEAR %in% c("1"), 1,  ifelse(nico_alch_2015$ALCLIFE %in% c("1"), 1, ifelse( nico_alch_2015$ALCYEAR %in% c("2") & nico_alch_2015$ALCLIFE %in% c("2"), 2, NA)))
+
+setwd("H:/MCBS/Survey File 2017/Data/SAS Files")
+nico_alch_1<- as.data.frame(read_sas('nicoalco.sas7bdat'))
+nico_alch_2016<- nico_alch_1 %>% select("BASEID","D_ALCLIF")
+nico_alch_2016$ever_drinker<-nico_alch_2016$D_ALCLIF
+
+setwd("H:/MCBS/Survey File 2018/Data/SAS Files")
+nico_alch_1<- as.data.frame(read_sas('nicoalco.sas7bdat'))
+nico_alch_2017<- nico_alch_1 %>% select("BASEID","D_ALCLIF")
+nico_alch_2017$ever_drinker<-nico_alch_2017$D_ALCLIF
+
+setwd("H:/MCBS/Survey File 2019/Data/SAS Files")
+nico_alch_1<- as.data.frame(read_sas('nicoalco.sas7bdat'))
+nico_alch_2018<- nico_alch_1 %>% select("BASEID","ALCLIFE")
+nico_alch_2018$ever_drinker<-nico_alch_2018$ALCLIFE
+
+setwd("H:/MCBS/Survey File 2020/Data/SAS Files")
+nico_alch_1<- as.data.frame(read_sas('nicoalco.sas7bdat'))
+nico_alch_2019<- nico_alch_1 %>% select("BASEID","ALCLIFE")
+nico_alch_2019$ever_drinker<-nico_alch_2019$ALCLIFE
+
+setwd("H:/MCBS/Survey File 2021/Data/SAS Files")
+nico_alch_1<- as.data.frame(read_sas('nicoalco.sas7bdat'))
+nico_alch_2020<- nico_alch_1 %>% select("BASEID","ALCLIFE")
+nico_alch_2020$ever_drinker<-nico_alch_2020$ALCLIFE
+
+alch<-bind_rows(nico_alch_2015,nico_alch_2016,nico_alch_2017,nico_alch_2018, nico_alch_2019, nico_alch_2020)
+alch_filtered <- alch %>%
+  distinct(BASEID, .keep_all = TRUE)
+
+BL_survey_totalpop_3<- left_join(BL_survey_totalpop_2, alch_filtered, by="BASEID")
+table(BL_survey_totalpop_3$ever_drinker, useNA="always")
+```
+
+## modify predictors so that "Refused", etc is included in NA
+## add labels to categorical
+```{r}
+# add the levels for the factor to control what is the reference
+BL_survey_totalpop_3$Region <- ifelse(BL_survey_totalpop_3$H_CENSUS %in% c("01", "02"), "East",
+                              ifelse(BL_survey_totalpop_3$H_CENSUS %in% c("03", "04"), "Midwest",
+                              ifelse(BL_survey_totalpop_3$H_CENSUS %in% c("05", "06", "07", "10"), "South",
+                              ifelse(BL_survey_totalpop_3$H_CENSUS %in% c("08", "09"), "West", NA))))
+BL_survey_totalpop_3$Region <- factor(BL_survey_totalpop_3$Region)
+table(BL_survey_totalpop_3$Region, useNA = "always")
+```
+
+```{r}
+BL_survey_totalpop_3$Education <- ifelse(BL_survey_totalpop_3$SPDEGRCV %in% c("1", "2", "3"), "Less than high school",
+                                  ifelse(BL_survey_totalpop_3$SPDEGRCV %in% c("4", "5", "6"), "High school",
+                                  ifelse(BL_survey_totalpop_3$SPDEGRCV %in% c("7", "8", "9"), "College or higher",
+                                  ifelse(BL_survey_totalpop_3$SPDEGRCV %in% c("D", "N", "R"), NA, NA))))
+BL_survey_totalpop_3$Education <- factor(BL_survey_totalpop_3$Education, levels = c("College or higher", "High school", "Less than high school"))
+table(BL_survey_totalpop_3$Education, useNA = "always")
+```
+
+```{r}
+# For WHITE
+BL_survey_totalpop_3$WHITE <- ifelse(BL_survey_totalpop_3$H_RACE %in% c("1"), "Non-Hispanic White",
+                             ifelse(BL_survey_totalpop_3$H_RACE %in% c("2", "3", "4", "5", "6"), "Other",
+                             ifelse(BL_survey_totalpop_3$H_RACE %in% c("0"), NA, NA)))
+BL_survey_totalpop_3$White <- factor(BL_survey_totalpop_3$WHITE, levels = c("Other", "Non-Hispanic White"))
+table(BL_survey_totalpop_3$White, useNA = "always")
+
+# For RACE
+BL_survey_totalpop_3$Race <- ifelse(BL_survey_totalpop_3$H_RACE %in% c("1"), "White",
+                            ifelse(BL_survey_totalpop_3$H_RACE %in% c("2"), "Black",
+                            ifelse(BL_survey_totalpop_3$H_RACE %in% c("3", "6"), "Other",  # North American Native to "Other"
+                            ifelse(BL_survey_totalpop_3$H_RACE %in% c("4"), "Asian",
+                            ifelse(BL_survey_totalpop_3$H_RACE %in% c("5"), "Hispanic",
+                            ifelse(BL_survey_totalpop_3$H_RACE %in% c("0"), NA, NA))))))
+BL_survey_totalpop_3$Race <- factor(BL_survey_totalpop_3$Race)
+table(BL_survey_totalpop_3$Race, useNA = "always")
+table(BL_survey_totalpop_3$RACE, useNA = "always")
+```
+
+```{r}
+BL_survey_totalpop_3$Sex <- ifelse(BL_survey_totalpop_3$H_SEX %in% c("1"), "Male",
+                            ifelse(BL_survey_totalpop_3$H_SEX %in% c("2"), "Female", NA))
+BL_survey_totalpop_3$Sex <- factor(BL_survey_totalpop_3$Sex, levels = c( "Female", "Male"))
+table(BL_survey_totalpop_3$Sex, useNA = "always")
+```
+
+```{r}
+BL_survey_totalpop_3$Marital_status <- ifelse(BL_survey_totalpop_3$SPMARSTA %in% c("1"), "Married",
+                                      ifelse(BL_survey_totalpop_3$SPMARSTA %in% c("2", "3", "4", "5"), "Single",
+                                      ifelse(BL_survey_totalpop_3$SPMARSTA %in% c("D", "N", "R"), NA, NA)))
+BL_survey_totalpop_3$Marital_status <- factor(BL_survey_totalpop_3$Marital_status, levels = c("Married", "Single"), exclude = NULL)
+table(BL_survey_totalpop_3$Marital_status, useNA = "always")
+# Check the class of the new factor variable
+class(BL_survey_totalpop_3$Marital_status)
+```
+
+```{r}
+BL_survey_totalpop_3$Medicaid <- ifelse(BL_survey_totalpop_3$H_MCSW %in% c("1"), "Some medicaid participation",
+                                ifelse(BL_survey_totalpop_3$H_MCSW %in% c("2"), "No medicaid participation", NA))
+BL_survey_totalpop_3$Medicaid <- factor(BL_survey_totalpop_3$Medicaid, levels = c("No medicaid participation", "Some medicaid participation"))
+table(BL_survey_totalpop_3$Medicaid, useNA = "always")
+```
+
+```{r}
+BL_survey_totalpop_3$Medicare_Advantage <- ifelse(BL_survey_totalpop_3$D_MADV %in% c("1"), "Enrolled in Medicare Advantage",
+                                          ifelse(is.na(BL_survey_totalpop_3$D_MADV), "Not enrolled in Medicare Advantage", NA))
+BL_survey_totalpop_3$Medicare_Advantage <- factor(BL_survey_totalpop_3$Medicare_Advantage, levels = c("Not enrolled in Medicare Advantage", "Enrolled in Medicare Advantage"))
+table(BL_survey_totalpop_3$Medicare_Advantage, useNA = "always")
+```
+
+```{r}
+BL_survey_totalpop_3$PARTD <- ifelse(BL_survey_totalpop_3$H_PARTD %in% c("1"), "Enrolled in Part D",
+                             ifelse(BL_survey_totalpop_3$H_PARTD %in% c("2"), "Not Enrolled in Part D", NA))
+BL_survey_totalpop_3$PARTD <- factor(BL_survey_totalpop_3$PARTD, levels = c("Not Enrolled in Part D", "Enrolled in Part D"))
+table(BL_survey_totalpop_3$PARTD, useNA = "always")
+```
+
+```{r}
+BL_survey_totalpop_3$Health_insurance <- ifelse(
+  BL_survey_totalpop_3$Medicaid %in% c("Some medicaid participation") & BL_survey_totalpop_3$Medicare_Advantage %in% c("Enrolled in Medicare Advantage"),0,
+  ifelse(BL_survey_totalpop_3$Medicaid %in% c("Some medicaid participation") & BL_survey_totalpop_3$Medicare_Advantage %in% c("Not enrolled in Medicare Advantage"),1,
+         ifelse(BL_survey_totalpop_3$Medicaid %in% c("No medicaid participation") & BL_survey_totalpop_3$Medicare_Advantage %in% c("Enrolled in Medicare Advantage"),2,  
+                ifelse( BL_survey_totalpop_3$Medicaid %in% c("No medicaid participation") & BL_survey_totalpop_3$Medicare_Advantage %in% c("Not enrolled in Medicare Advantage"),3 , NA ))))
+
+BL_survey_totalpop_3$Health_insurance<- factor(BL_survey_totalpop_3$Health_insurance, levels = c(0, 1, 2, 3), labels = c("MA_Medicaid","TM_Medicaid", "MA", "TM"))
+prop.table(table(BL_survey_totalpop_3$Health_insurance))
+```
+
+```{r}
+#smoking and drinking
+BL_survey_totalpop_3$Current_former_smoking<- ifelse(BL_survey_totalpop_3$CIG100 %in% '1' & BL_survey_totalpop_3$CIGNOW %in% c('1', '2'), "current-smoker", ifelse(BL_survey_totalpop_3$CIG100 %in% '1'& BL_survey_totalpop_3$CIGNOW %in% c('3'), "former-smoker", ifelse(BL_survey_totalpop_3$CIG100 %in% '2', "never-smoker",NA))) 
+table(BL_survey_totalpop_3$Current_former_smoking, exclude=NULL)
+
+BL_survey_totalpop_3$Current_former_smoking<- factor(BL_survey_totalpop_3$Current_former_smoking, c("never-smoker", "former-smoker", "current-smoker"))
+
+BL_survey_totalpop_3$Current_smoking <- factor(
+  ifelse(BL_survey_totalpop_3$Current_former_smoking == "current-smoker", 
+         1, 
+         ifelse(BL_survey_totalpop_3$Current_former_smoking %in% c("never-smoker", "former-smoker"), 
+                0, 
+                NA)),
+  levels = c(0, 1),
+  labels = c("Non-Smoker", "Current Smoker")
+)
+                                                                                                                
+BL_survey_totalpop_3$Drinking <- ifelse(
+  BL_survey_totalpop_3$ever_drinker %in% '1'  & is.na(BL_survey_totalpop_3$ALCDAY),
+  0,
+  ifelse(
+    BL_survey_totalpop_3$ever_drinker %in% '1' & !is.na(BL_survey_totalpop_3$ALCDAY) & !(BL_survey_totalpop_3$ALCDAY %in% c('D', 'R')),
+    BL_survey_totalpop_3$ALCDAY,
+    ifelse(BL_survey_totalpop_3$ever_drinker %in% '2', 0, NA) ))
+table(BL_survey_totalpop_3$Drinking, useNA = "always")
+table(BL_survey_totalpop_3$Current_former_smoking,BL_survey_totalpop_3$Current_smoking )
+```
+
+```{r}
+# Assuming BL_survey_totalpop_3 is your data frame
+if (exists("ERETINOP", where = BL_survey_totalpop_3) && exists("RETINEVR", where = BL_survey_totalpop_3)) {
+  BL_survey_totalpop_3$Retinopathy <- ifelse(!is.na(BL_survey_totalpop_3$ERETINOP), 
+                                           BL_survey_totalpop_3$ERETINOP, 
+                                           BL_survey_totalpop_3$RETINEVR)
+} else if (exists("ERETINOP", where = BL_survey_totalpop_3)) {
+  BL_survey_totalpop_3$Retinopathy <- BL_survey_totalpop_3$ERETINOP
+} else if (exists("RETINEVR", where = BL_survey_totalpop_3)) {
+  BL_survey_totalpop_3$Retinopathy <- BL_survey_totalpop_3$RETINEVR
+} else { BL_survey_totalpop_3$Retinopathy <- NA}
+
+table(BL_survey_totalpop_3$Retinopathy, exclude=NULL)
+```
+
+```{r}
+#Using Quan Charlson to create a Charlson Commoorbidity Index
+BL_survey_totalpop_3$CHF_d<- ifelse(BL_survey_totalpop_3$OCCFAIL %in% c('1') | BL_survey_totalpop_3$CHF %in% c('1', '3') , 2, ifelse(BL_survey_totalpop_3$OCCFAIL %in% c('2') | BL_survey_totalpop_3$CHF %in% c('0' ,'2'), 0, NA))
+
+BL_survey_totalpop_3$Dementia<- ifelse(BL_survey_totalpop_3$OCDEMENT %in% c('1') | BL_survey_totalpop_3$ALZHDMTA %in% c('1', '3') , 2, ifelse(BL_survey_totalpop_3$OCDEMENT %in% c('2') | BL_survey_totalpop_3$ALZHDMTA %in% c('0' ,'2'), 0, NA))
+
+BL_survey_totalpop_3$COPD_d<- ifelse(BL_survey_totalpop_3$OCEMPHYS %in% c('1') | BL_survey_totalpop_3$COPD %in% c('1', '3') , 1, ifelse(BL_survey_totalpop_3$OCEMPHYS %in% c('2') | BL_survey_totalpop_3$COPD %in% c('0' ,'2'), 0, NA))
+
+BL_survey_totalpop_3$CTD<- ifelse(BL_survey_totalpop_3$OCARTHRH %in% c('1'), 1, ifelse(BL_survey_totalpop_3$OCARTHRH %in% c('2'),0,  NA))
+
+BL_survey_totalpop_3$Hemiplegia<- ifelse(BL_survey_totalpop_3$OCPPARAL  %in% c('1'), 2, ifelse(BL_survey_totalpop_3$OCPPARAL %in% c('2'),0, NA))
+
+BL_survey_totalpop_3$CKD<- ifelse(BL_survey_totalpop_3$CHRNKIDN  %in% c('1', '3'), 1, 
+ifelse(BL_survey_totalpop_3$CHRNKIDN %in% c('0', '2'), 0, NA)) #is CKD moderate / severe
+ 
+BL_survey_totalpop_3$Malignancy <- ifelse(
+  BL_survey_totalpop_3$OCCANCER %in% c('1'), 
+  2,  # Value when condition is TRUE
+ ifelse(BL_survey_totalpop_3$OCCANCER %in% c('2')
+  , 0, # Value when condition is FALSE
+  NA))
+#no metastatic solid tumor variable exists in MCBS to be included in Charlson_QUAN
+
+BL_survey_totalpop_3$HIV_AIDS<- ifelse(BL_survey_totalpop_3$HIVAIDS  %in% c('1', '3'), 4, ifelse(BL_survey_totalpop_3$HIVAIDS %in% c('0', '2'), 0, NA))
+
+BL_survey_totalpop_3$Diabetes_CCI<- ifelse(BL_survey_totalpop_3$Retinopathy  %in% c('1') | BL_survey_totalpop_3$DIAKDPEV  %in% c('1'), 1, ifelse(BL_survey_totalpop_3$Retinopathy  %in% c('2') & BL_survey_totalpop_3$DIAKDPEV  %in% c('2') , 0, ifelse(BL_survey_totalpop_3$Retinopathy  %in% c('D','R') & BL_survey_totalpop_3$DIAKDPEV  %in% c('D', '.'), NA, 0 )))
+```
+
+```{r}
+psum <- function(...,na.rm=FALSE) { 
+  rowSums(do.call(cbind,list(...)),na.rm=na.rm) } 
+BL_survey_totalpop_3$Charlson_QUAN <- psum(BL_survey_totalpop_3$CHF_d,
+                                       BL_survey_totalpop_3$Dementia,
+                                       BL_survey_totalpop_3$COPD_d,
+                                       BL_survey_totalpop_3$CTD,
+                                       BL_survey_totalpop_3$Hemiplegia,
+                                       BL_survey_totalpop_3$CKD,
+                                       BL_survey_totalpop_3$Malignancy,
+                                       BL_survey_totalpop_3$HIV_AIDS,
+                                       BL_survey_totalpop_3$Diabetes_CCI,na.rm = F)
+
+
+summary(BL_survey_totalpop_3$Charlson_QUAN)
+mean(is.na(BL_survey_totalpop_3$Charlson_QUAN))
+```
+```{r}
+BL_survey_totalpop_3$Age<-BL_survey_totalpop_3$H_AGE
+#Diabetes Duration... uses age as opposed to dates as claim data cannot be completely accurate prior to medicare enrollment
+
+BL_survey_totalpop_3$DM_duration_years<- BL_survey_totalpop_3$Age - BL_survey_totalpop_3$DIAAGE
+
+summary(BL_survey_totalpop_3$DM_duration_years)
+```
+
+```{r}
+#create heart failure and ASCVD dummies
+BL_survey_totalpop_3$CHF_factor<- factor(ifelse(BL_survey_totalpop_3$OCCFAIL %in% c('1') | BL_survey_totalpop_3$CHF %in% c('1', '3') , 1, ifelse(BL_survey_totalpop_3$OCCFAIL %in% c('2') | BL_survey_totalpop_3$CHF %in% c('0' ,'2'), 0, NA)),  levels = c(0, 1), labels = c("NO_CHF", "YES_CHF"))
+
+table(BL_survey_totalpop_3$CHF_factor, useNA = "always")
+
+BL_survey_totalpop_3$ASCVD <- factor(
+  ifelse(
+    BL_survey_totalpop_3$OCMYOCAR %in% c('1') | 
+    BL_survey_totalpop_3$OCCHD %in% c('1') | 
+    BL_survey_totalpop_3$OCSTROKE %in% c('1') | 
+    BL_survey_totalpop_3$ISCHMCHT %in% c('1', '3') | 
+    BL_survey_totalpop_3$STRKETIA %in% c('1', '3'),
+    1,
+    ifelse(
+      BL_survey_totalpop_3$OCMYOCAR %in% c('2') | 
+      BL_survey_totalpop_3$OCCHD %in% c('2') | 
+      BL_survey_totalpop_3$OCSTROKE %in% c('2') | 
+      BL_survey_totalpop_3$ISCHMCHT %in% c('0', '2') | 
+      BL_survey_totalpop_3$STRKETIA %in% c('0', '2'),
+      0,
+      NA   )),
+  levels = c(0, 1),
+  labels = c("NO_ASCVD", "YES_ASCVD") )
+table(BL_survey_totalpop_3$ASCVD, useNA = "always")
+```
+
+```{r}
+#create ADL...higher score = more independent
+BL_survey_totalpop_3$BATH <- ifelse(BL_survey_totalpop_3$HPPDBATH %in% '2', 1,
+                                    ifelse(BL_survey_totalpop_3$HPPDBATH %in% c('1', '3'), 0, NA))
+BL_survey_totalpop_3$DRESS <- ifelse(BL_survey_totalpop_3$HPPDDRES %in% '2', 1,
+                                     ifelse(BL_survey_totalpop_3$HPPDDRES %in% c('1', '3'), 0, NA))
+BL_survey_totalpop_3$EAT <- ifelse(BL_survey_totalpop_3$HPPDEAT %in% '2', 1,
+                                   ifelse(BL_survey_totalpop_3$HPPDEAT %in% c('1', '3'), 0, NA))
+BL_survey_totalpop_3$CHAIR <- ifelse(BL_survey_totalpop_3$HPPDCHAR %in% '2', 1,
+                                     ifelse(BL_survey_totalpop_3$HPPDCHAR %in% c('1', '3'), 0, NA))
+BL_survey_totalpop_3$WALK <- ifelse(BL_survey_totalpop_3$HPPDWALK %in% '2', 1,
+                                    ifelse(BL_survey_totalpop_3$HPPDWALK %in% c('1', '3'), 0, NA))
+BL_survey_totalpop_3$TOILET <- ifelse(BL_survey_totalpop_3$HPPDTOIL %in% '2', 1,
+                                      ifelse(BL_survey_totalpop_3$HPPDTOIL %in% c('1', '3'), 0, NA))
+
+BL_survey_totalpop_3$TELE <- ifelse(BL_survey_totalpop_3$PRBTELE %in% '2', 1,
+                                    ifelse(BL_survey_totalpop_3$PRBTELE %in% c('1', '3'), 0, NA))
+BL_survey_totalpop_3$HHW <- ifelse(BL_survey_totalpop_3$PRBHHWK %in% '2', 1,
+                                   ifelse(BL_survey_totalpop_3$PRBHHWK %in% c('1', '3'), 0, NA))
+BL_survey_totalpop_3$LHW <- ifelse(BL_survey_totalpop_3$PRBLHWK %in% '2', 1,
+                                   ifelse(BL_survey_totalpop_3$PRBLHWK %in% c('1', '3'), 0, NA))
+BL_survey_totalpop_3$MEAL <- ifelse(BL_survey_totalpop_3$PRBMEAL %in% '2', 1,
+                                    ifelse(BL_survey_totalpop_3$PRBMEAL %in% c('1', '3'), 0, NA))
+BL_survey_totalpop_3$SHOP <- ifelse(BL_survey_totalpop_3$PRBSHOP %in% '2', 1,
+                                    ifelse(BL_survey_totalpop_3$PRBSHOP %in% c('1', '3'), 0, NA))
+BL_survey_totalpop_3$BILLS <- ifelse(BL_survey_totalpop_3$PRBBILS %in% '2', 1,
+                                     ifelse(BL_survey_totalpop_3$PRBBILS %in% c('1', '3'), 0, NA))
+
+BL_survey_totalpop_3$ADL <- psum(
+  BL_survey_totalpop_3$BATH,
+  BL_survey_totalpop_3$DRESS,
+  BL_survey_totalpop_3$EAT,
+  BL_survey_totalpop_3$CHAIR,
+  BL_survey_totalpop_3$WALK,
+  BL_survey_totalpop_3$TOILET , na.rm= F
+)#combine ADL variables into one score.
+
+BL_survey_totalpop_3$IADL <- psum(
+  BL_survey_totalpop_3$TELE,
+  BL_survey_totalpop_3$HHW,
+  BL_survey_totalpop_3$LHW,
+  BL_survey_totalpop_3$MEAL,
+  BL_survey_totalpop_3$SHOP,
+  BL_survey_totalpop_3$BILLS,
+  na.rm = F  
+)
+summary(BL_survey_totalpop_3$ADL)
+```
+
+```{r}
+#calculate BMI
+BL_survey_totalpop_4<- BL_survey_totalpop_3 %>% group_by(BASEID) %>% mutate(HEIGHT= sum(HEIGHTIN + HEIGHTFT*12)) #height in inches
+
+BL_survey_totalpop_5<- BL_survey_totalpop_4 %>% group_by(BASEID) %>% mutate(BMI= (WEIGHT / (HEIGHT^2) *703)) #calculating BMI and converting to kg/m^2..
+
+summary(BL_survey_totalpop_5$HEIGHTIN)
+summary(BL_survey_totalpop_5$HEIGHT*2.54)
+summary(BL_survey_totalpop_5$BMI)
+```
+
+```{r}
+#set this up like current and former smoker 
+#create a CVD risk calculation using an equation from the below paper
+#https://pubmed.ncbi.nlm.nih.gov/32285938/
+
+#Leave a note explaining why D & R are set to NA and the rest are set to 0 
+
+BL_survey_totalpop_5$STOOP <- ifelse(BL_survey_totalpop_5$DIFSTOOP %in% c('1', '2', '3', '4', '5'), 1, 
+                                   ifelse(BL_survey_totalpop_5$DIFSTOOP %in% c('D', 'R'), NA, 0))
+
+BL_survey_totalpop_5$LIFT <- ifelse(BL_survey_totalpop_5$DIFLIFT %in% c('1', '2', '3', '4', '5'), 1, 
+                                  ifelse(BL_survey_totalpop_5$DIFLIFT %in% c('D', 'R'), NA, 0))
+
+BL_survey_totalpop_5$REACH <- ifelse(BL_survey_totalpop_5$DIFREACH %in% c('1', '2', '3', '4', '5'), 1, 
+                                   ifelse(BL_survey_totalpop_5$DIFREACH %in% c('D', 'R'), NA, 0))
+
+BL_survey_totalpop_5$WRITE <- ifelse(BL_survey_totalpop_5$DIFWRITE %in% c('1', '2', '3', '4', '5'), 1, 
+                                   ifelse(BL_survey_totalpop_5$DIFWRITE %in% c('D', 'R'), NA, 0))
+
+BL_survey_totalpop_5$WALKQM <- ifelse(BL_survey_totalpop_5$DIFWALK %in% c('1', '2', '3', '4', '5'), 1, 
+                                    ifelse(BL_survey_totalpop_5$DIFWALK %in% c('D', 'R'), NA, 0))
+
+BL_survey_totalpop_5$formersmoker <- ifelse(BL_survey_totalpop_3$Current_former_smoking=='former-smoker',1,0)
+
+BL_survey_totalpop_5$currentsmoker <- ifelse(BL_survey_totalpop_3$Current_former_smoking=='current-smoker',1,0)
+
+
+BL_survey_totalpop_5$hypertension<- ifelse(BL_survey_totalpop_5$OCHBP %in% c('1') , 1 , ifelse(BL_survey_totalpop_5$OCHBP %in% c('D', 'R'), NA,  0) )
+
+BL_survey_totalpop_5$NAGI <- psum(
+  BL_survey_totalpop_5$STOOP,
+  BL_survey_totalpop_5$LIFT,
+  BL_survey_totalpop_5$REACH,
+  BL_survey_totalpop_5$WRITE,
+  BL_survey_totalpop_5$WALKQM,
+  na.rm = FALSE
+)
+
+BL_survey_totalpop_5$diabetes_CVD<- ifelse(BL_survey_totalpop_5$OCBETES %in% c('1'), 1, ifelse(BL_survey_totalpop_5$OCBETES %in% c('D', 'R'), NA,  0) )
+
+BL_survey_totalpop_5$goodtoexcellenthealth<- ifelse(BL_survey_totalpop_5$GENHELTH  %in% c('1', '2', '3'), 1, ifelse(BL_survey_totalpop_5$GENHELTH %in% c('D', 'R'), NA, 0) ) #fixed this recently 
+
+BL_survey_totalpop_5$female<-ifelse(BL_survey_totalpop_5$Sex %in% c('2'), 1, 0)
+
+BL_survey_totalpop<- BL_survey_totalpop_5  %>% group_by(BASEID) %>%  mutate(xbeta = sum(0.0493048*(Age) - 0.4127335*(female) + 0.0137368*(BMI) + 0.32828*(hypertension) + 0.2312507*(formersmoker) + 0.6309833*(currentsmoker) + 0.5180146*(diabetes_CVD) + 0.1480837*(NAGI) - 0.2559038* (goodtoexcellenthealth))) #this is the equation from the paper linked above
+
+BL_survey_totalpop$Prob_CVD_event <- 1-0.96221^exp(BL_survey_totalpop$xbeta-4.278063)
+BL_survey_totalpop$Risk_CVD_event<-BL_survey_totalpop$Prob_CVD_event*100
+summary(BL_survey_totalpop$Prob_CVD_event*100)#check 04/18/2024 in percent
+summary(BL_survey_totalpop$Risk_CVD_event)
+#missing BMI is affecting this.. missing about 19%
+mean(is.na(BL_survey_totalpop$Risk_CVD_event))
+```
+
+```{r}
+#create diabetes population subset of total population by those with who self-report having diabetes or have claims for diabetes at baseline.
+BL_survey_DM_pop<- subset( BL_survey_totalpop, D_OCDTYP %in% c('2') | DIABETES %in% c('1', '3'))
+BL_survey_DM_pop$self_report_diabetes_only <- factor(
+  ifelse(BL_survey_DM_pop$D_OCDTYP %in% c('2') & !(BL_survey_DM_pop$DIABETES %in% c('1', '3')), 1, 0),
+  labels = c("has claims", "self-report only")
+)
+
+self_report_diabetes_only_table <- subset(BL_survey_DM_pop, select = c(BASEID ,D_OCDTYP, DIABETES, self_report_diabetes_only))
+self_report_diabetes_only_table
+```
+```{r}
+BL_survey_DM_pop$AgeBinary <- ifelse(BL_survey_DM_pop$Age >= 65, "65 and older", "Under 65")
+
+BL_survey_DM_pop$ESRD <- ifelse(BL_survey_DM_pop$H_MEDSTA %in% c("11", "21", "31"), "ESRD",
+                            ifelse(BL_survey_DM_pop$H_MEDSTA %in% c("10", "20"), "No ESRD", NA))
+BL_survey_DM_pop$ESRD <- factor(BL_survey_DM_pop$ESRD, levels = c( "ESRD", "No ESRD"))
+
+table(BL_survey_DM_pop$ESRD, useNA = "always")
+
+BL_survey_DM_pop$Disabled <- ifelse(BL_survey_DM_pop$H_MEDSTA %in% c("20"), "Disabled",
+                            ifelse(BL_survey_DM_pop$H_MEDSTA %in% c("10", "20"), "Aged", NA))
+BL_survey_DM_pop$Disabled <- factor(BL_survey_DM_pop$Disabled, levels = c( "Aged", "Disabled" ))
+
+table(BL_survey_DM_pop$ESRD, useNA = "always")
+table(BL_survey_DM_pop$Disabled, BL_survey_DM_pop$AgeBinary, useNA = "always")
+```
+
+```{r}
+unique_BL_survey_DM_pop <-BL_survey_DM_pop %>% 
+  distinct(BASEID, .keep_all = TRUE)
+  
+  nrow(unique_BL_survey_DM_pop)
+```
+
+# Part 2: Baseline Cost Data Preparation
+
+```{r}
+#read in the data files, and select and join variables of interest in from the cost file for the baseline
+
+analyze_cost_panel<- function(panel){
+prescriptiont1<-as.data.frame(read_sas('pme.sas7bdat'))
+
+prescriptiont2 <- prescriptiont1 %>% 
+
+   select("AMTOOP", "TABNUM", "THERCC", "FDB_GNN", "FDB_BN", "QNTY", "SERV_DT", "DAYSUPP","AMTNUM", "AMTUNIT", "BASEID", "SURVEYYR", "NDC_CD", "AMTTOT", "FDB_STR", "DRUGNAME",  "PMEID") 
+
+prescription<- unique(prescriptiont2)
+
+person_summary_1<- as.data.frame(read_sas('ps.sas7bdat')) #determine what variables to select and then merge with survey file
+person_summary<- person_summary_1 %>% select("BASEID", "PAMTOOP", "PAMTPM", "PEVENTS", "PAMTTOT")
+
+
+cost_joined<- left_join(prescriptiont2,person_summary) }
+```
+
+```{r}
+#add or subtract years based on the length of your analysis
+cost_directories_BL <- c(
+  "H:/MCBS/Cost Supplement 2016/Data/SAS Files",
+  "H:/MCBS/Cost Supplement 2017/Data/SAS Files",
+  "H:/MCBS/Cost Supplement 2018/Data/SAS Files",
+  "H:/MCBS/Cost Supplement 2019/Data/SAS Files",
+  "H:/MCBS/Cost Supplement 2020/Data/SAS Files",
+  "H:/MCBS/Cost Supplement 2021/Data/SAS Files"
+)
+```
+
+```{r, eval=FALSE}
+# create a list of the cost directories for baseline
+base_directory_cost<- "C:/MCBS_SAS/Cost"
+cost_directories_BL <- list.dirs(base_directory_cost, full.names = TRUE, recursive = FALSE)
+
+cost_directories_BL<- cost_directories_BL[2:7]
+```
+
+```{r}
+#iterate through the cost baseline directories, and read in and join the variables using the previously defined function
+
+cost_BL <- list()
+
+year_cost <- 2016
+panel_number_cost <- 2015
+
+for (panel in cost_directories_BL) {
+  setwd(panel)
+  panel_data_cost_BL <- analyze_cost_panel(year_cost)
+  
+  # Append the panel data to the list
+  cost_BL[[panel_number_cost]] <- panel_data_cost_BL
+  
+  year_cost <- year_cost + 1
+  panel_number_cost <- panel_number_cost + 1 }
+```
+
+```{r}
+#bind each year's baseline cost data together into a single baseline cost file encompassing all years of interest
+BL_cost_totalpop<-bind_rows(cost_BL[2015], cost_BL[2016], cost_BL[2017], cost_BL[2018], cost_BL[2019])
+```
+
+```{r}
+BL_cost_totalpop %>% 
+  filter(THERCC == "71") %>%
+  distinct(FDB_GNN)
+```
+
+# Part 3: Outcome Survey Data Preparation
+```{r}
+#read in the data files, and select and join variables of interest in from the survey file for the outcome
+
+analyze_survey_panel_OC<- function(panel){
+  
+ demographics_1<-as.data.frame(read_sas('demo.sas7bdat'))
+demographics_OC<- demographics_1 %>% select("D_DOD","H_DOD" ,"BASEID", "PANEL", "SURVEYYR") 
+
+hisumry_1<- as.data.frame(read_sas('hisumry.sas7bdat'))
+hisumry_OC<- hisumry_1 %>% select("H_MCSW", "BASEID" )
+
+residence_timeline_1<-  as.data.frame(read_sas('restmln.sas7bdat'))
+residence_timeline<- residence_timeline_1 %>% select ("BASEID" , "D_TYPE") #community vs facility
+
+rxmed_1<-  as.data.frame(read_sas('rxmed.sas7bdat'))
+rxmed_oc<- rxmed_1 %>% select ("BASEID" , "DOSESRX", "SKIPRX", "DELAYRX", "NOFILLRX")
+
+chronic_conditions<-as.data.frame(read_sas('chrncond.sas7bdat'))
+chronic_conditions_OC <- chronic_conditions %>%
+   select("OCBETES", "D_OCDTYP", "OCDVISIT", "BASEID" )
+
+chronic_conditionflag<- as.data.frame(read_sas('chrncdfl.sas7bdat'))
+chronic_conditionflag_OC <- chronic_conditionflag %>%
+   select(DIABETES , DIABTESE, BASEID  ) 
+
+OC_survey_a<- left_join( demographics_OC , chronic_conditionflag_OC)
+OC_survey_a1<- left_join( OC_survey_a , chronic_conditions_OC )
+OC_survey_a2<- left_join( OC_survey_a1 , rxmed_oc )
+OC_survey<- left_join( OC_survey_a2 , residence_timeline, by="BASEID")
+  
+survey_data_OC<- subset(OC_survey, PANEL %in% c(panel_number_survey_OC) & SURVEYYR %in% c(year_survey_OC) )}
+```
+
+```{r}
+#add or subtract years based on the length of your analysis
+survey_directories_OC <- c(
+  "H:/MCBS/Survey File 2017/Data/SAS Files",
+  "H:/MCBS/Survey File 2018/Data/SAS Files",
+  "H:/MCBS/Survey File 2019/Data/SAS Files",
+  "H:/MCBS/Survey File 2020/Data/SAS Files",
+  "H:/MCBS/Survey File 2021/Data/SAS Files"
+)
+```
+
+```{r, message=FALSE, warning=FALSE}
+#iterate through the survey outcome directories, and read in and join the variables using the previously defined function. Adjust as noted below to switch from 1 year to 2 year outcome period.
+
+survey_OC <- list()
+
+year_survey_OC <- 2017 # this need to be adjusted for 2 year follow up.. 2017 for 1 year outcome assuming the 2015 panel is the first panel...2018 for 2 year outcome
+
+panel_number_survey_OC <- 2015
+
+for (panel in survey_directories_OC) {
+  setwd(panel)
+  panel_data_survey_OC <- analyze_survey_panel_OC(year_survey_OC)
+  
+  # Append the panel data to the list
+  survey_OC[[panel_number_survey_OC]] <- panel_data_survey_OC
+  
+  year_survey_OC <- year_survey_OC + 1
+  panel_number_survey_OC <- panel_number_survey_OC + 1
+}
+```
+
+```{r}
+#bind each year's outcome survey data together into a single baseline survey file encompassing all years of interest
+OC_survey_totalpop<-bind_rows(survey_OC[2015], survey_OC[2016], survey_OC[2017], survey_OC[2018],survey_OC[2019])
+OC_survey_totalpop
+
+#create diabetes population subset of the total population by those with who self-report having diabetes or have claims for diabetes at outcome
+OC_survey_DM_pop<- subset( OC_survey_totalpop, D_OCDTYP %in% c('2') | DIABETES %in% c('1', '3'))
+OC_survey_DM_pop$self_report_diabetes_only<- factor(ifelse(OC_survey_DM_pop$D_OCDTYP %in% c('2') & !(OC_survey_DM_pop$DIABETES %in% c('1', '3')), 1, 0))
+```
+```{r}
+# Smaller_dose
+OC_survey_DM_pop$Smaller_dose <- ifelse(OC_survey_DM_pop$DOSESRX %in% c("3"), "Never",
+                               ifelse(OC_survey_DM_pop$DOSESRX %in% c("2", "3"), "Often/Sometimes",
+                               ifelse(OC_survey_DM_pop$DOSESRX %in% c("D", "R"), NA, NA)))
+
+# Convert to factor including NA
+OC_survey_DM_pop$Smaller_dose <- factor(OC_survey_DM_pop$Smaller_dose, levels = c("Never", "Often/Sometimes"), exclude = NULL)
+
+# No_fill_cost
+OC_survey_DM_pop$No_fill_cost <- ifelse(OC_survey_DM_pop$NOFILLRX %in% c("3"), "Never",
+                               ifelse(OC_survey_DM_pop$NOFILLRX %in% c("2", "3"), "Often/Sometimes",
+                               ifelse(OC_survey_DM_pop$NOFILLRX %in% c("D", "R"), NA, NA)))
+
+# Convert to factor including NA
+OC_survey_DM_pop$No_fill_cost <- factor(OC_survey_DM_pop$No_fill_cost, levels = c("Never", "Often/Sometimes"), exclude = NULL)
+
+# Skip_doses
+OC_survey_DM_pop$Skip_doses <- ifelse(OC_survey_DM_pop$SKIPRX %in% c("3"), "Never",
+                               ifelse(OC_survey_DM_pop$SKIPRX %in% c("2", "3"), "Often/Sometimes",
+                               ifelse(OC_survey_DM_pop$SKIPRX %in% c("D", "R"), NA, NA)))
+
+# Convert to factor including NA
+OC_survey_DM_pop$Skip_doses <- factor(OC_survey_DM_pop$Skip_doses, levels = c("Never", "Often/Sometimes"), exclude = NULL)
+
+# Delay_RX
+OC_survey_DM_pop$Delay_RX <- ifelse(OC_survey_DM_pop$DELAYRX %in% c("3"), "Never",
+                               ifelse(OC_survey_DM_pop$DELAYRX %in% c("2", "3"), "Often/Sometimes",
+                               ifelse(OC_survey_DM_pop$DELAYRX %in% c("D", "R"), NA, NA)))
+
+# Convert to factor including NA
+OC_survey_DM_pop$Delay_RX <- factor(OC_survey_DM_pop$Delay_RX, levels = c("Never", "Often/Sometimes"), exclude = NULL)
+
+# Checking the class and table of each variable
+class(OC_survey_DM_pop$Smaller_dose)
+table(OC_survey_DM_pop$Smaller_dose, useNA = "always")
+
+class(OC_survey_DM_pop$No_fill_cost)
+table(OC_survey_DM_pop$No_fill_cost, useNA = "always")
+
+class(OC_survey_DM_pop$Skip_doses)
+table(OC_survey_DM_pop$Skip_doses, useNA = "always")
+
+class(OC_survey_DM_pop$Delay_RX)
+table(OC_survey_DM_pop$Delay_RX, useNA = "always")
+```
+
+```{r}
+# Recode D_TYPE variable
+OC_survey_DM_pop$D_TYPE <- ifelse(OC_survey_DM_pop$D_TYPE %in% c("C"), 1, 
+                                    ifelse(OC_survey_DM_pop$D_TYPE %in% c("F", "B"), 0, NA))
+
+# Convert D_TYPE to factor
+OC_survey_DM_pop$Care_Setting <- factor(OC_survey_DM_pop$D_TYPE, levels = c(1, 0), labels = c("C", "F/B"))
+
+# Print the levels and class of the D_TYPE variable
+print(levels(OC_survey_DM_pop$Care_Setting))
+print(class(OC_survey_DM_pop$Care_Setting))
+```
+
+# Part 4: Outcome Cost Data Preparation
+```{r}
+#read in the data files, and select and join variables of interest in from the cost file for the outcome
+analyze_cost_panel_OC<- function(panel){
+prescription_1 <- as.data.frame(read_sas('pme.sas7bdat'))
+prescription <- prescription_1 %>% 
+   select("AMTOOP", "TABNUM", "THERCC", "FDB_GNN", "FDB_BN", "QNTY", "SERV_DT", "DAYSUPP","AMTNUM", "AMTUNIT",  "BASEID", "SURVEYYR", "NDC_CD", "AMTTOT", "FDB_STR", "DRUGNAME", "PMEID") 
+
+prescription <- unique(prescription)
+
+person_summary_1 <- as.data.frame(read_sas('ps.sas7bdat'))
+person_summary<- person_summary_1 %>% select("BASEID", "PAMTOOP", "PAMTPM", "PEVENTS", "PAMTTOT")
+
+twoyearweights<-as.data.frame(read_sas('csl2wgts.sas7bdat'))
+threeyearweights<-as.data.frame(read_sas('csl3wgts.sas7bdat'))
+
+cost_joined_OC<- left_join(prescription,person_summary)
+}
+```
+
+```{r}
+#add or subtract years based on the length of your analysis
+cost_directories_OC <- c(
+  "H:/MCBS/Cost Supplement 2017/Data/SAS Files",
+  "H:/MCBS/Cost Supplement 2018/Data/SAS Files",
+  "H:/MCBS/Cost Supplement 2019/Data/SAS Files",
+  "H:/MCBS/Cost Supplement 2020/Data/SAS Files",
+  "H:/MCBS/Cost Supplement 2021/Data/SAS Files"
+)
+```
+
+```{r, warning=FALSE}
+#iterate through the cost outcome directories, and read in and join the variables using the previously defined function. Adjust as noted below to switch from 1 year to 2 year outcome period.
+cost_OC <- list()
+
+year_cost_OC <- 2017 #this would also need to change depending on a 1 or 2 year outcome period. For a 1 year outcome, this should be 201x, where 201x is the first year of outcome one is concerned with. Assuming the 2015 panel is the first panel, this 201x should be 2017. If you are using a 2 year outcome this should be in the form c(201x, 201y). If the 2015 panel is the first panel than this should be c(2017,2018) for two year follow up,... 
+
+#don't think this is actually used within the code..check
+
+panel_number_cost_OC <- 2015
+
+for (panel in cost_directories_OC) {
+  setwd(panel)
+  panel_data_cost_OC <- analyze_cost_panel_OC(year_cost_OC)
+  
+  # Append the panel data to the list
+  cost_OC[[panel_number_cost_OC]] <- panel_data_cost_OC
+  
+  year_cost_OC <- year_cost_OC + 1
+  panel_number_cost_OC <- panel_number_cost_OC + 1
+}
+```
+
+```{r}
+#bind each year's outcome cost data together into a single outcome cost file encompassing all outcome years of interest
+OC_cost_totalpop<-bind_rows(cost_OC[2015], cost_OC[2016], cost_OC[2017], cost_OC[2018],cost_OC[2019])
+```
+
+```{r}
+#join the survey and cost files at baseline and outcome
+length(unique(BL_survey_DM_pop$BASEID))
+BL_total_DM_pop<- inner_join(BL_cost_totalpop, BL_survey_DM_pop)
+unique_BL_total_DM_pop <-BL_total_DM_pop %>%  distinct(BASEID, .keep_all = TRUE)
+nrow(unique_BL_total_DM_pop)
+OC_DM_pop<- inner_join(OC_cost_totalpop, OC_survey_DM_pop, by="BASEID", suffix=c(".c",".s"))
+```
+```{r}
+nrow(subset(OC_DM_pop, PANEL=="2015"))
+```
+```{r}
+test_2015_panel_out<-subset(OC_DM_pop, PANEL %in% "2015")
+table(test_2015_panel_out$SURVEYYR.c)
+
+nrow(test_2015_panel_out)
+```
+```{r}
+#Ensure that you are using each individual once by creating a subset of the outcome file that includes only the outcome year(s) immediately following the baseline. Adjust as noted below to switch from 1 year to 2 year outcome period.  
+
+Panel_numbers<-2015:2019 #change based on 1 / 2 year outcome... (201x:201y) where 201x is the first panel you will use, and 201y is the final panel. 
+
+OC_period<- 2017 #this would also need to change depending on a 1 or 2 year outcome period. For a 1 year outcome, this should be 201x, where 201x is the first year of outcome you are concerned with. Assuming the 2015 panel is the first panel, this 201x should be 2017. If you are using a 2 year outcome this should be in the form c(201x, 201y). If the 2015 panel is out first panel than this should be c(2017,2018) for two year follow up,... 
+
+OC<- list()
+
+for (panel_number in Panel_numbers) {
+panel_OC<-subset(OC_DM_pop, PANEL %in% panel_number & SURVEYYR.c %in% OC_period)
+  
+  OC[[panel_number]] <- panel_OC
+                        
+  OC_period<-  OC_period +  1}
+
+OC_total_DM_pop<-bind_rows(OC[2015], OC[2016], OC[2017], OC[2018],OC[2019])
+```
+
+#create R object 
+```{r}
+#create R objects for baseline and outcome diabetes population. Create an R object for the total population's survey files at baseline.
+setwd("H:/MCBS_R_objects")
+saveRDS(BL_total_DM_pop, file = "BL_total_DM_pop.rds")
+saveRDS(OC_total_DM_pop, file = "OC_total_DM_pop.rds")
+saveRDS(BL_survey_totalpop, file= "BL_survey_totalpop.rds")
+saveRDS(cost_directories_OC, file="cost_directories_OC.rds")
+```
+```{r}
+knitr::purl("MCBS_panel_prep_1-13-25.rmd")
+```

@@ -1,0 +1,1266 @@
+---
+title: "MCBS_variable_creation_1-13-25"
+author: "Nicklas Klepser"
+date: "2024-1-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r , echo=FALSE, message=FALSE}
+library(RODBC)
+library(epitools)
+library(dsrTest)
+library(knitr)
+library(rvest)
+library(readxl)
+library(stringdist)
+library(dplyr)
+library(writexl)
+library(reshape)
+library(survival)
+library(mstate)
+library(foreign)
+library(haven)
+library(ggplot2)
+library(mosaic)
+library(lessR)
+library(sjlabelled)
+library(rlang)
+library(tidyverse)
+library(survey)
+library(gtsummary)
+library(utils)
+library(tidyr)
+library(adheRenceRX)
+```
+
+```{r}
+#create target drug lists 
+  list_GLP1RA_generics<- list("Lixisenatide","Liraglutide", "Semaglutide", "Exenatide", "Albiglutide", "Dulaglutide", "Efpeglenatide", "INSULIN GLARGINE/LIXISENATIDE", "EXENATIDE MICROSPHERES", "insulin degludec/liraglutide", "SEMAGLUTIDE SITAGLIPTIN PHOS/METFORMIN")
+GLP1RA_genericsupper<-lapply(list_GLP1RA_generics, toupper)
+GLP1RA_genericslower<-lapply(list_GLP1RA_generics, tolower)
+GLP1RA_generics<- c(GLP1RA_genericslower, GLP1RA_genericsupper)#they either appear as all lowercase or all uppercase
+
+list_SGLT2i_generics<- list("Empagliflozin", "Dapagliflozin",  "dapagliflozin/metformin HCl", "DAPAGLIFLOZIN PROPANEDIOL", "Canagliflozin", "canagliflozin/metformin HCl" ,"Ertugliflozin", "Sotagliflozin", "EMPAGLIFLOZIN/LINAGLIPTIN", "empagliflozin/metformin HCl", "ertugliflozin pidolate")
+SGLT2i_genericsupper<-lapply(list_SGLT2i_generics, toupper)
+SGLT2i_genericslower<-lapply(list_SGLT2i_generics, tolower)
+SGLT2i_generics<- c(SGLT2i_genericslower, SGLT2i_genericsupper)
+```
+
+```{r}
+#read in R objects from the panel prep file of diabetes baseline and outcome 
+setwd("H:/MCBS_R_objects")
+
+data_BL_total_DM_pop<- readRDS("BL_total_DM_pop.rds")
+
+data_OC_total_DM_pop<- readRDS("OC_total_DM_pop.rds")
+```
+```{r}
+#count baseline deaths 
+
+#determine an individual's death year, and set those who did not die to 0 to allow one to filter later
+
+data_BL_total_DM_pop$death_year_DM<- ifelse(is.na(data_BL_total_DM_pop$H_DOD), 0, as.numeric(format(data_BL_total_DM_pop$H_DOD, "%Y")))
+
+data_BL_total_DM_pop$baseline_death<- ifelse(data_BL_total_DM_pop$death_year_DM == data_BL_total_DM_pop$PANEL + 1, 1, 0)
+
+#people who died in baseline
+baseline_death_panel_DM <- data_BL_total_DM_pop %>%
+  filter(baseline_death > 0) %>%
+  select(death_year_DM, PANEL, H_DOD,BASEID) %>%
+  distinct(BASEID, .keep_all = TRUE)
+
+head(baseline_death_panel_DM,100)
+```
+
+#filter out those who die in baseline
+```{r}
+#filtering out those who died in baseline as they will not be included in the analysis
+length(unique(data_BL_total_DM_pop$BASEID))
+
+data_BL_total_DM_pop<- data_BL_total_DM_pop  %>% filter(baseline_death < 1 ) 
+
+length(unique(data_BL_total_DM_pop$BASEID))
+```
+```{r}
+#creating a variable for the Total_hypoglycemics_OOP before beginning to filter by the target drugs. This will allow one to calculate the OOP variables later 
+
+#this is excluding those without a service date 
+
+#total OOP cost of hypoglycemic drugs 
+data_BL_total_DM_pop <- data_BL_total_DM_pop %>%
+ group_by(BASEID) %>%
+  mutate(
+   Total_Hypoglycemics_OOP = sum(ifelse(THERCC == "71", AMTOOP, 0), na.rm = TRUE)
+ ) %>%
+ ungroup()
+
+Hypoglycemic_data_frame<-data_BL_total_DM_pop %>% filter(THERCC == "71") %>% select( "BASEID", "THERCC", "FDB_GNN", "FDB_BN", "FDB_STR", "DRUGNAME")
+
+#FDB_GNN is the First Database generic name 
+Hypoglycemic_generic_list<- lapply(Hypoglycemic_data_frame$FDB_GNN, toupper)
+
+table(unlist(Hypoglycemic_generic_list))
+
+Hypoglycemic_generic_list <- unique(Hypoglycemic_generic_list)
+```
+
+#create other insulin and oral diabetes drog lists
+```{r}
+#create lists of insulin and other diabetes drugs. one list for each that excludes GLP1RA, one excluding SGLT2i, and one that excludes both SGLT2is and GLP1RAs
+
+insulin_generics_list <- Hypoglycemic_generic_list[grep("insulin", Hypoglycemic_generic_list, ignore.case = TRUE)]
+
+insulin_genericsupper<-lapply(insulin_generics_list, toupper)
+insulin_genericslower<-lapply(insulin_generics_list, tolower)
+insulin_generics<- c(insulin_genericslower, insulin_genericsupper)
+insulin_generics_exGLP1RA <- insulin_generics[!(insulin_generics %in% GLP1RA_generics)]
+insulin_generics_exSGLT2i <- insulin_generics[!(insulin_generics %in% SGLT2i_generics)]
+insulin_generics_exGLP1RA_SGLT2i <- insulin_generics[!(insulin_generics %in% GLP1RA_generics | insulin_generics %in% SGLT2i_generics)]
+
+#exclude GLP1RA and SGLT2i 
+
+non_insulin_DM_meds_list <- Hypoglycemic_generic_list[!(Hypoglycemic_generic_list %in% insulin_generics)]
+
+Oral_genericsupper<-lapply(non_insulin_DM_meds_list, toupper)
+Oral_genericslower<-lapply(non_insulin_DM_meds_list, tolower)
+non_insulin_DM_meds<- c(Oral_genericslower, Oral_genericsupper)
+
+non_insulin_DM_meds_exGLP1RA <- non_insulin_DM_meds[!(non_insulin_DM_meds %in% GLP1RA_generics)]
+non_insulin_DM_meds_exSGLT2i <- non_insulin_DM_meds[!(non_insulin_DM_meds %in% SGLT2i_generics)]
+non_insulin_DM_meds_exGLP1RA_SGLT2i <- non_insulin_DM_meds[!(non_insulin_DM_meds %in% GLP1RA_generics | non_insulin_DM_meds %in% SGLT2i_generics)]
+```
+
+#create drug dummies
+```{r}
+#create dummy for GLP1RA1, SGLT2i2 and users of both drugs for baseline and outcome 
+
+data_BL_total_DM_pop$GLP1RA<- as.numeric(data_BL_total_DM_pop$FDB_GNN %in% GLP1RA_generics)
+data_BL_total_DM_pop$SGLT2i<- as.numeric(data_BL_total_DM_pop$FDB_GNN %in% SGLT2i_generics)
+
+data_BL_total_DM_pop$GLP1RA_factor<- factor(data_BL_total_DM_pop$GLP1RA, levels = c("0", "1"), exclude = NULL)
+data_BL_total_DM_pop$SGLT2i_factor<- factor(data_BL_total_DM_pop$SGLT2i, levels = c("0", "1"), exclude = NULL)
+
+data_BL_total_DM_pop <- data_BL_total_DM_pop %>%
+  group_by(BASEID) %>%
+  mutate(has_GLP1RA = as.integer(any(GLP1RA == "1")),
+         has_SGLT2i = as.integer(any(SGLT2i == "1")),
+         BothDrugs_BL = as.integer(has_GLP1RA & has_SGLT2i)) %>%
+  ungroup()
+
+data_BL_total_DM_pop <- data_BL_total_DM_pop %>%
+  group_by(BASEID) %>%
+  mutate(has_GLP1RA_factor = factor(has_GLP1RA, levels = c("0", "1"), exclude = NULL), has_SGLT2i_factor = factor(has_SGLT2i, levels = c("0", "1"), exclude = NULL)) %>% ungroup()
+  
+# number with target drug fill in baseline 
+Target_drug_pop<- data_BL_total_DM_pop %>%
+  filter(has_GLP1RA == 1 | has_SGLT2i == 1) 
+
+length(unique(Target_drug_pop$BASEID))
+
+data_OC_total_DM_pop$GLP1RA<- as.integer(data_OC_total_DM_pop$FDB_GNN %in% GLP1RA_generics)
+data_OC_total_DM_pop$SGLT2i<- as.integer(data_OC_total_DM_pop$FDB_GNN %in% SGLT2i_generics)
+data_OC_total_DM_pop <- data_OC_total_DM_pop %>%
+  group_by(BASEID) %>%
+  mutate(has_GLP1RA = as.integer(any(GLP1RA == "1")),
+         has_SGLT2i = as.integer(any(SGLT2i == "1")),
+         BothDrugs_OC = as.integer(has_GLP1RA & has_SGLT2i)) %>%
+  ungroup()
+
+```
+```{r}
+data_BL_total_DM_pop <- data_BL_total_DM_pop %>%
+  mutate(flag_non_missing_service = ifelse((GLP1RA == "1" | SGLT2i == "1") & !is.na(SERV_DT), 2,
+                                           ifelse(GLP1RA != "1" & SGLT2i != "1", 0, 1))) %>%
+  group_by(BASEID) %>%
+  mutate(max_flag_non_missing_service = max(flag_non_missing_service)) %>%
+  ungroup()
+```
+
+#create dummies for insulin and other oral diabetes medication
+```{r}
+#create  dummies for insulin and other oral diabetes medication
+set_consistent_levels <- function(factor_variable) {
+  factor_variable <- factor(factor_variable, levels = c("no", "yes"))}
+
+# Update factors for variables
+data_BL_total_DM_pop <- data_BL_total_DM_pop %>%
+  group_by(BASEID) %>%
+  mutate(
+    Insulin_exSGLT2i_GLP1RA = as.integer(any(FDB_GNN %in% insulin_generics_exGLP1RA_SGLT2i)),
+    Insulin_exSGLT2i = as.integer(any(FDB_GNN %in% insulin_generics_exSGLT2i)),
+    Insulin_exGLP1RA = as.integer(any(FDB_GNN %in% insulin_generics_exGLP1RA))
+  ) %>%
+  ungroup()
+
+# Update factors for oral diabetes medication variables
+data_BL_total_DM_pop <- data_BL_total_DM_pop %>%
+  group_by(BASEID) %>%
+  mutate(
+    Oral_DM_med_exSGLT2i_GLP1RA = as.integer(any(FDB_GNN %in% non_insulin_DM_meds_exGLP1RA_SGLT2i)),
+    Oral_DM_med_exSGLT2i = as.integer(any(FDB_GNN %in% non_insulin_DM_meds_exSGLT2i)),
+    Oral_DM_med_exGLP1RA = as.integer(any(FDB_GNN %in% non_insulin_DM_meds_exGLP1RA)),
+    # Add additional variables here
+    Oral_DM_med = as.integer(any(FDB_GNN %in% non_insulin_DM_meds))
+  ) %>%
+  ungroup()
+
+data_BL_total_DM_pop$Insulin_exSGLT2i_GLP1RA[data_BL_total_DM_pop$Insulin_exSGLT2i_GLP1RA %in% c("0")] <- "no insulin"
+data_BL_total_DM_pop$Insulin_exSGLT2i_GLP1RA[data_BL_total_DM_pop$Insulin_exSGLT2i_GLP1RA %in% c("1")] <- "insulin"
+data_BL_total_DM_pop$Insulin_exSGLT2i_GLP1RA<- factor(data_BL_total_DM_pop$Insulin_exSGLT2i_GLP1RA, levels= c("no insulin", "insulin"))
+
+data_BL_total_DM_pop$Insulin_exSGLT2i[data_BL_total_DM_pop$Insulin_exSGLT2i %in% c("0")] <- "no insulin"
+data_BL_total_DM_pop$Insulin_exSGLT2i[data_BL_total_DM_pop$Insulin_exSGLT2i %in% c("1")] <- "insulin"
+data_BL_total_DM_pop$Insulin_exSGLT2i<- factor(data_BL_total_DM_pop$Insulin_exSGLT2i , levels= c("no insulin", "insulin"))
+
+data_BL_total_DM_pop$Insulin_exGLP1RA[data_BL_total_DM_pop$Insulin_exGLP1RA %in% c("0")] <- "no insulin"
+data_BL_total_DM_pop$Insulin_exGLP1RA[data_BL_total_DM_pop$Insulin_exGLP1RA %in% c("1")] <- "insulin"
+data_BL_total_DM_pop$Insulin_exGLP1RA<- factor(data_BL_total_DM_pop$Insulin_exGLP1RA, levels= c("no insulin", "insulin"))
+
+data_BL_total_DM_pop$Oral_DM_med_exSGLT2i_GLP1RA[data_BL_total_DM_pop$Oral_DM_med_exSGLT2i_GLP1RA %in% c("0")] <- "no oral DM"
+data_BL_total_DM_pop$Oral_DM_med_exSGLT2i_GLP1RA[data_BL_total_DM_pop$Oral_DM_med_exSGLT2i_GLP1RA %in% c("1")] <- "oral DM"
+data_BL_total_DM_pop$Oral_DM_med_exSGLT2i_GLP1RA<- factor(data_BL_total_DM_pop$Oral_DM_med_exSGLT2i_GLP1RA,  levels= c("no oral DM", "oral DM"))
+
+data_BL_total_DM_pop$Oral_DM_med_exSGLT2i[data_BL_total_DM_pop$Oral_DM_med_exSGLT2i %in% c("0")] <- "no oral DM"
+data_BL_total_DM_pop$Oral_DM_med_exSGLT2i[data_BL_total_DM_pop$Oral_DM_med_exSGLT2i %in% c("1")] <- "oral DM"
+data_BL_total_DM_pop$Oral_DM_med_exSGLT2i<- factor(data_BL_total_DM_pop$Oral_DM_med_exSGLT2i, levels= c("no oral DM", "oral DM"))
+
+data_BL_total_DM_pop$Oral_DM_med_exGLP1RA[data_BL_total_DM_pop$Oral_DM_med_exGLP1RA %in% c("0")] <- "no oral DM"
+data_BL_total_DM_pop$Oral_DM_med_exGLP1RA[data_BL_total_DM_pop$Oral_DM_med_exGLP1RA %in% c("1")] <- "oral DM"
+data_BL_total_DM_pop$Oral_DM_med_exGLP1RA<- factor(data_BL_total_DM_pop$Oral_DM_med_exGLP1RA, levels= c("no oral DM", "oral DM"))
+```
+
+```{r}
+#create dataframes for distinct GLP1RA and SGLT2i users with only 1 row for each, and create a combined data frame. Not immediately necessary.
+GLP1RA_users_BL<-data_BL_total_DM_pop %>%
+  filter(GLP1RA=="1") %>%
+  distinct(BASEID, .keep_all = TRUE)
+
+SGLT2i_users_BL<-data_BL_total_DM_pop %>%
+  filter(SGLT2i=="1") %>%
+  distinct(BASEID, .keep_all = TRUE)
+
+combined_users_BL <- union(GLP1RA_users_BL, SGLT2i_users_BL)
+combined_users_BL_unique_BASEIDS <- combined_users_BL %>%
+distinct(BASEID, .keep_all = TRUE)
+
+combined_baseids <- c(GLP1RA_users_BL$BASEID, SGLT2i_users_BL$BASEID)
+length(unique(combined_baseids))
+
+length(unique(data_BL_total_DM_pop$BASEID))
+```
+
+#create a dataframe with all the hypoglycemic fills of target drug users 
+```{r}
+#create a dataframe with all the hypoglycemic fills of target drug users 
+target_drug_users_BL_all_hypoglycemic_fills<- data_BL_total_DM_pop %>%
+ filter(GLP1RA=="1" | SGLT2i =="1")%>% filter(THERCC =="71") %>% group_by(BASEID, FDB_GNN) %>%
+  summarise(n = n_distinct(FDB_GNN)) %>%
+  ungroup()
+
+#look the hypoglycemic drugs used by target drug users are using 
+Hypoglycemic_generic_list_target_drug_users<- lapply(target_drug_users_BL_all_hypoglycemic_fills$FDB_GNN, toupper)
+
+(table(unlist(Hypoglycemic_generic_list_target_drug_users)))
+```
+
+```{r}
+#create dataframe for the total diabetes populations that have dummy variables for target drugs, but include the total diabetes population and all fills.
+data_BL_total_DM_pop_drug_dummies<-data_BL_total_DM_pop
+data_OC_total_DM_pop_drug_dummies<- data_OC_total_DM_pop
+setwd("H:/MCBS_R_objects")
+saveRDS(data_BL_total_DM_pop_drug_dummies, file = "BL_total_DM_pop_drug_dummies.rds")
+saveRDS(data_OC_total_DM_pop_drug_dummies, file = "OC_total_DM_pop_drug_dummies.rds")
+```
+#filter out fills with no service date
+```{r}
+length(unique(data_BL_total_DM_pop$BASEID))
+length(unique(data_OC_total_DM_pop$BASEID))
+
+data_BL_total_DM_pop<- data_BL_total_DM_pop %>% filter(!is.na(SERV_DT))
+
+data_OC_total_DM_pop<- data_OC_total_DM_pop %>% filter(!is.na(SERV_DT))
+
+length(unique(data_BL_total_DM_pop$BASEID))
+length(unique(data_OC_total_DM_pop$BASEID))
+```
+#calculate supply variables
+## general target drug user pop
+```{r}
+#calculate supply variables row-wise prior to censoring or adjusting based on year carryover 
+#BL GLP1RA supply 
+#create a single supply variable for GLP1RAs using only DAYSUPP
+
+
+BL_GLP1RA_supp <- data_BL_total_DM_pop %>%
+  filter(GLP1RA == "1") %>%
+  mutate(GLP1RA_Supply_BL =  ifelse(!is.na(DAYSUPP),DAYSUPP, 0)) 
+
+BL_GLP1RA_supp <- BL_GLP1RA_supp %>% #total GLP1RA supply
+  filter(GLP1RA == "1") %>%
+  group_by(BASEID) %>%
+  mutate(Pre_adjustment_GLP1RA_Supply_BL = sum(GLP1RA_Supply_BL, na.rm = TRUE))%>% ungroup()
+
+BL_GLP1RA_supp<- BL_GLP1RA_supp %>%
+  group_by(BASEID) %>%
+  mutate(Pre_adjustment_GLP1RA_Supply_BL = max(Pre_adjustment_GLP1RA_Supply_BL, na.rm = TRUE),
+          GLP1RA_first_fill_BL = min(SERV_DT, na.rm = TRUE))%>% ungroup()
+
+#OC GLP1RA supply
+OC_GLP1RA_supp<- data_OC_total_DM_pop %>% filter(GLP1RA=="1") %>%
+mutate(GLP1RA_Supply_OC= ifelse(!is.na(DAYSUPP),DAYSUPP, 0)) 
+
+OC_GLP1RA_supp <- OC_GLP1RA_supp %>% #total GLP1RA supply
+  filter(GLP1RA == "1") %>%
+  group_by(BASEID) %>%
+  mutate(Pre_adjustment_GLP1RA_Supply_OC = sum(GLP1RA_Supply_OC, na.rm = TRUE))
+
+OC_GLP1RA_supp<- OC_GLP1RA_supp %>%
+  group_by(BASEID) %>%
+  mutate(Pre_adjustment_GLP1RA_Supply_OC = max(Pre_adjustment_GLP1RA_Supply_OC, na.rm = TRUE),
+          GLP1RA_first_fill_OC = min(SERV_DT, na.rm = TRUE))%>% ungroup()
+
+#BL SGLT2i supply
+#create a single supply variable for SGLT2is by row ... this only works assuming they are all one-a-day pills. This is not needed now that we are only included fill that have service dates.
+
+BL_SGLT2i_supp <- data_BL_total_DM_pop %>%
+  filter(SGLT2i == "1") %>%
+  mutate(SGLT2i_Supply_BL =   ifelse(!is.na(DAYSUPP), DAYSUPP, 
+                           ifelse(!is.na(TABNUM), TABNUM, 
+                           ifelse(!is.na(QNTY), QNTY, 0))))#this will create a SGLT2i supply variable that fills with DAYSUPP first, TABNUM 2nd and then QNTY last
+
+BL_SGLT2i_supp <- BL_SGLT2i_supp %>% #total SGLT2i supply
+  filter(SGLT2i == "1") %>%
+  group_by(BASEID) %>%
+  mutate(Pre_adjustment_SGLT2i_Supply_BL = sum(SGLT2i_Supply_BL, na.rm = TRUE))
+
+BL_SGLT2i_supp<- BL_SGLT2i_supp %>%
+  group_by(BASEID) %>%
+  mutate(Pre_adjustment_SGLT2i_Supply_BL = max(Pre_adjustment_SGLT2i_Supply_BL, na.rm = TRUE),
+         SGLT2i_first_fill_BL = min(SERV_DT, na.rm = TRUE))%>% ungroup()
+
+OC_SGLT2i_supp<- data_OC_total_DM_pop %>% filter(SGLT2i=="1") %>% 
+  mutate(SGLT2i_Supply_OC=  ifelse(!is.na(DAYSUPP), DAYSUPP, 
+                           ifelse(!is.na(TABNUM), TABNUM, 
+                           ifelse(!is.na(QNTY), QNTY, 0))))
+
+OC_SGLT2i_supp <- OC_SGLT2i_supp %>% #total SGLT2i supply
+  filter(SGLT2i == "1") %>%
+  group_by(BASEID) %>%
+  mutate(Pre_adjustment_SGLT2i_Supply_OC = sum(SGLT2i_Supply_OC, na.rm = TRUE))
+
+OC_SGLT2i_supp<- OC_SGLT2i_supp %>%
+  group_by(BASEID) %>%
+  mutate(Pre_adjustment_SGLT2i_Supply_OC = max(Pre_adjustment_SGLT2i_Supply_OC, na.rm = TRUE), SGLT2i_first_fill_OC = min(SERV_DT, na.rm = TRUE))%>% ungroup()
+```
+
+#calculate basline days covered (baseline MPR denominator)
+```{r}
+# Finding the number of days covered at baseline for GLP1RA users (the denominator of the MPR calculation)
+BL_GLP1RA_days_1 <- BL_GLP1RA_supp  %>%
+  filter(GLP1RA == "1") %>%
+  filter(any(!is.na(SERV_DT))) %>% # Filter out those with completely missing service dates 
+  mutate(
+    # Extract the year of the first fill at baseline
+    BL_yr_GLP1RA = as.numeric(format(GLP1RA_first_fill_BL, "%Y", na.rm = TRUE)),
+    # Create a variable for December 31st of the baseline year
+    yr_end_BL_GLP1RA = as.Date(paste(BL_yr_GLP1RA, "-12-31", sep = ""), format = "%Y-%m-%d"),
+    GLP1RA_end_date= SERV_DT + DAYSUPP -1,
+    GLP1RA_excess= ifelse(GLP1RA_end_date>yr_end_BL_GLP1RA, difftime(GLP1RA_end_date, yr_end_BL_GLP1RA, units = "days") , 0 ),
+    GLP1RA_DAYSUPP_adj= DAYSUPP -  GLP1RA_excess)
+```
+
+```{r}
+BL_GLP1RA_days_2 <- BL_GLP1RA_days_1 %>% # Days in period GLP1RA users 
+  filter(GLP1RA == "1") %>%
+  group_by(BASEID) %>%
+  filter(any(!is.na(SERV_DT))) %>% # Filter out those with completely missing service dates 
+  mutate(
+   GLP1RA_days_denom_BL= as.integer(difftime(yr_end_BL_GLP1RA, GLP1RA_first_fill_BL, units = "days" )) + 1) %>% ungroup()
+```
+
+```{r}
+# Finding the number of days covered at baseline for SGLT2i users (the denominator of the MPR calculation)
+BL_SGLT2i_days_1 <- BL_SGLT2i_supp  %>%
+  filter(SGLT2i == "1") %>%
+  filter(any(!is.na(SERV_DT))) %>% # Filter out those with completely missing service dates 
+  mutate(
+    # Extract the year of the first fill at baseline
+    BL_yr_SGLT2i = as.numeric(format(SGLT2i_first_fill_BL, "%Y", na.rm = TRUE)),
+    # Create a variable for December 31st of the baseline year
+    yr_end_BL_SGLT2i = as.Date(paste(BL_yr_SGLT2i, "-12-31", sep = ""), format = "%Y-%m-%d"),
+    SGLT2i_end_date= SERV_DT + DAYSUPP -1,
+    SGLT2i_excess= ifelse(SGLT2i_end_date>yr_end_BL_SGLT2i, difftime(SGLT2i_end_date, yr_end_BL_SGLT2i, units = "days") , 0 ),
+    SGLT2i_DAYSUPP_adj= DAYSUPP -  SGLT2i_excess )
+```
+
+```{r}
+BL_SGLT2i_days_2 <- BL_SGLT2i_days_1 %>% # Days in period SGLT2i users 
+  filter(SGLT2i == "1") %>%
+  group_by(BASEID) %>%
+  filter(any(!is.na(SERV_DT))) %>% # Filter out those with completely missing service dates 
+  mutate(
+   SGLT2i_days_denom_BL= as.integer(difftime(yr_end_BL_SGLT2i, SGLT2i_first_fill_BL, units = "days" )) + 1) %>% ungroup()
+```
+
+```{r}
+#fill the total days in period (MPR+ PDC denominator) with the maximum total days for each BASEID while ignoring missing values.
+  
+ BL_GLP1RA_days <- BL_GLP1RA_days_2 %>%
+  group_by(BASEID) %>%
+  mutate(
+    max_GLP1RA_BL_days_denom = max(GLP1RA_days_denom_BL, na.rm = TRUE), 
+    total_GLP1RA_DAYSUPP_adj_BL = sum(GLP1RA_DAYSUPP_adj, na.rm = TRUE),
+    GLP1RA_carryover_suppy_BL = sum(GLP1RA_excess, na.rm = TRUE)
+  )
+
+ BL_SGLT2i_days <- BL_SGLT2i_days_2 %>%
+  group_by(BASEID) %>%
+  mutate(
+    max_SGLT2i_BL_days_denom = max(SGLT2i_days_denom_BL, na.rm = TRUE), 
+    total_SGLT2i_DAYSUPP_adj_BL = sum(SGLT2i_DAYSUPP_adj, na.rm = TRUE),
+    SGLT2i_carryover_suppy_BL = sum(SGLT2i_excess, na.rm = TRUE)
+  )
+```
+
+#outcome
+```{r}
+# Finding the number of days covered at baseline for GLP1RA users (the denominator of the MPR calculation)
+OC_GLP1RA_days_1 <- OC_GLP1RA_supp  %>%
+  filter(GLP1RA == "1") %>%
+  filter(any(!is.na(SERV_DT))) %>% # Filter out those with completely missing service dates 
+  mutate(
+    # Extract the year of the first fill at baseline
+    OC_yr_GLP1RA = as.numeric(format(GLP1RA_first_fill_OC, "%Y", na.rm = TRUE)),
+     yr_start_OC_GLP1RA = as.Date(paste(OC_yr_GLP1RA, "-01-01", sep = ""), format = "%Y-%m-%d"),
+    
+    # Create a variable for December 31st of the baseline year
+  
+    yr_end_OC_GLP1RA = as.Date(paste(OC_yr_GLP1RA, "-12-31", sep = ""), format = "%Y-%m-%d"),
+    GLP1RA_death_yr_OC = ifelse(is.na(H_DOD), 0, as.numeric(format(H_DOD, "%Y"))), # Determine the year of death if applicable
+    
+    GLP1RA_period_end_date_OC = as.Date(ifelse(GLP1RA_death_yr_OC == OC_yr_GLP1RA & H_DOD<= yr_end_OC_GLP1RA,H_DOD, yr_end_OC_GLP1RA)),
+                                       
+    GLP1RA_end_date_OC= SERV_DT + DAYSUPP -1,
+    
+    GLP1RA_excess_OC= ifelse(GLP1RA_end_date_OC>GLP1RA_period_end_date_OC, difftime(GLP1RA_end_date_OC, GLP1RA_period_end_date_OC, units = "days") , 0 ),
+    GLP1RA_DAYSUPP_adj_OC= DAYSUPP -  GLP1RA_excess_OC
+  )
+```
+
+```{r}
+OC_GLP1RA_days_2 <- OC_GLP1RA_days_1 %>% # Days in period GLP1RA users 
+  filter(GLP1RA == "1") %>%
+  group_by(BASEID) %>%
+  filter(any(!is.na(SERV_DT))) %>% # Filter out those with completely missing service dates 
+  mutate(
+   GLP1RA_days_denom_OC= as.integer(difftime(GLP1RA_period_end_date_OC, yr_start_OC_GLP1RA, units = "days" )) + 1) %>% ungroup()
+```
+```{r}
+# Finding the number of days covered at baseline for SGLT2i users (the denominator of the MPR calculation)
+OC_SGLT2i_days_1 <- OC_SGLT2i_supp  %>%
+  filter(SGLT2i == "1") %>%
+  filter(any(!is.na(SERV_DT))) %>% # Filter out those with completely missing service dates 
+  mutate(
+    # Extract the year of the first fill at baseline
+    OC_yr_SGLT2i = as.numeric(format(SGLT2i_first_fill_OC, "%Y", na.rm = TRUE)),
+     yr_start_OC_SGLT2i = as.Date(paste(OC_yr_SGLT2i, "-01-01", sep = ""), format = "%Y-%m-%d"),
+    
+    # Create a variable for December 31st of the baseline year
+  
+    yr_end_OC_SGLT2i = as.Date(paste(OC_yr_SGLT2i, "-12-31", sep = ""), format = "%Y-%m-%d"),
+    SGLT2i_death_yr_OC = ifelse(is.na(H_DOD), 0, as.numeric(format(H_DOD, "%Y"))), # Determine the year of death if applicable
+    
+    SGLT2i_period_end_date_OC = as.Date(ifelse(SGLT2i_death_yr_OC == OC_yr_SGLT2i & H_DOD<= yr_end_OC_SGLT2i,H_DOD, yr_end_OC_SGLT2i)),
+                                       
+    SGLT2i_end_date_OC= SERV_DT + DAYSUPP -1,
+    
+    SGLT2i_excess_OC= ifelse(SGLT2i_end_date_OC>SGLT2i_period_end_date_OC, difftime(SGLT2i_end_date_OC, SGLT2i_period_end_date_OC, units = "days") , 0 ),
+    SGLT2i_DAYSUPP_adj_OC= DAYSUPP -  SGLT2i_excess_OC
+  )
+```
+
+```{r}
+OC_SGLT2i_days_2 <- OC_SGLT2i_days_1 %>% # Days in period SGLT2i users 
+  filter(SGLT2i == "1") %>%
+  group_by(BASEID) %>%
+  filter(any(!is.na(SERV_DT))) %>% # Filter out those with completely missing service dates 
+  mutate(
+   SGLT2i_days_denom_OC= as.integer(difftime(SGLT2i_period_end_date_OC, yr_start_OC_SGLT2i, units = "days" )) + 1) %>% ungroup()
+```
+
+```{r}
+# Fill the total days in the outcome period with the maximum total days for each BASEID while ignoring missing values
+OC_GLP1RA_days <- OC_GLP1RA_days_2 %>%
+  group_by(BASEID) %>%
+  mutate(max_GLP1RA_OC_days_denom = replace(max(GLP1RA_days_denom_OC, na.rm = TRUE), is.infinite(max(GLP1RA_days_denom_OC, na.rm = TRUE)), NA),
+       total_GLP1RA_DAYSUPP_adj_OC = sum(GLP1RA_DAYSUPP_adj_OC),
+    GLP1RA_carryover_suppy_OC = sum(GLP1RA_excess_OC)      )
+
+OC_SGLT2i_days <- OC_SGLT2i_days_2 %>%
+  group_by(BASEID) %>%
+  mutate(max_SGLT2i_OC_days_denom = replace(max(SGLT2i_days_denom_OC, na.rm = TRUE), is.infinite(max(SGLT2i_days_denom_OC, na.rm = TRUE)), NA),
+            total_SGLT2i_DAYSUPP_adj_OC = sum(SGLT2i_DAYSUPP_adj_OC),
+    SGLT2i_carryover_suppy_OC = sum(SGLT2i_excess_OC)   )
+
+summary(OC_SGLT2i_days$max_SGLT2i_OC_days_denom)
+```
+# Healthcare Resource utilization / total cost excluding OOP for BL
+```{r}
+#Healthcare Resource utilization / total cost excluding OOP for BL
+#Here I join in the service summary file to utilize the Total OOP PME
+
+analyze_service_summary_panel<- function(panel){
+service_summary<-as.data.frame(read_sas('ss.sas7bdat'))
+service_summary_PME<-service_summary %>% filter(EVNTTYPE  == "PM") }
+```
+
+```{r}
+#add or subtract years based on the length of your analysis
+cost_directories_BL <- c(
+  "H:/MCBS/Cost Supplement 2016/Data/SAS Files",
+  "H:/MCBS/Cost Supplement 2017/Data/SAS Files",
+  "H:/MCBS/Cost Supplement 2018/Data/SAS Files",
+  "H:/MCBS/Cost Supplement 2019/Data/SAS Files",
+  "H:/MCBS/Cost Supplement 2020/Data/SAS Files",
+  "H:/MCBS/Cost Supplement 2021/Data/SAS Files"
+)
+```
+
+```{r}
+#iterate through baseline cost directories and run function above that extracts the total PME OOP for each individual
+service_summary_BL <- list()
+
+year_cost <- 2016
+panel_number_cost <- 2015
+
+for (panel in cost_directories_BL) {
+  setwd(panel)
+  service_summary_BL_analysis <- analyze_service_summary_panel(year_cost)
+  
+  # Append the panel data to the list
+  service_summary_BL[[panel_number_cost]] <- service_summary_BL_analysis
+  
+  year_cost <- year_cost + 1
+  panel_number_cost <- panel_number_cost + 1
+}
+```
+
+```{r}
+#Bind all years of service summary 
+service_summary<-bind_rows(service_summary_BL[2015], service_summary_BL[2016], service_summary_BL[2017], service_summary_BL[2018],service_summary_BL[2019])
+head(service_summary %>% select(BASEID, SURVEYYR ,AAMTOOP )%>% filter(BASEID== "01702994"))
+```
+
+##create baseline OOP variables for the target drugs
+```{r}
+#create total out of pocket cost variables for BL before calculating the differences in OOP costs. Exclude those w/o service dates
+BL_GLP1RA_OOP <- BL_GLP1RA_days %>% #OOP GLP1RA
+  filter(GLP1RA == "1") %>%
+  group_by(BASEID) %>%
+  mutate(Total_GLP1RA_OOP_BL = sum(AMTOOP, na.rm = TRUE))
+
+BL_SGLT2i_OOP <- BL_SGLT2i_days %>% #OOP SGLT2i
+  filter(SGLT2i == "1") %>%
+  group_by(BASEID) %>%
+  mutate(Total_SGLT2i_OOP_BL = sum(AMTOOP, na.rm = TRUE))
+```
+
+```{r}
+quantile(BL_GLP1RA_OOP$Total_GLP1RA_OOP_BL)
+quantile(BL_SGLT2i_OOP$Total_SGLT2i_OOP_BL)
+```
+```{r}
+#total OOP excluding PME
+summary_panel_1_BL_GLP1RA <- BL_GLP1RA_OOP %>%
+  left_join(service_summary,  suffix= c("", ".ss")) %>%
+  group_by(BASEID) %>%
+  mutate(Total.OOP.ex.PME = (PAMTOOP  - AAMTOOP))
+
+#TOTAL non-hypoglycemic PME OOP
+summary_panel_2_BL_GLP1RA <- summary_panel_1_BL_GLP1RA %>%
+
+  group_by(BASEID) %>%
+  mutate(Total.Non.Hypo.OOP = (AAMTOOP - Total_Hypoglycemics_OOP))
+
+#other hypoglycemic PME OOP (should i subtract outmissing_date_GLP1RA_OOP_BL? )
+summary_panel_3_BL_GLP1RA <- summary_panel_2_BL_GLP1RA %>%
+  group_by(BASEID) %>%
+  mutate(Total.Non.GLP1RA.hypo.OOP = (Total_Hypoglycemics_OOP - Total_GLP1RA_OOP_BL))
+
+confirm_GLP1RA_OOP_adds<-summary_panel_3_BL_GLP1RA %>% select(BASEID, SURVEYYR, Total_GLP1RA_OOP_BL, Total.OOP.ex.PME, Total.Non.Hypo.OOP, Total.Non.GLP1RA.hypo.OOP) %>% distinct(BASEID, .keep_all = TRUE)
+```
+
+```{r}
+unique_for_GLP1RA_OOP_summary_stats<-summary_panel_3_BL_GLP1RA %>% distinct(BASEID, .keep_all = TRUE)
+
+summary(unique_for_GLP1RA_OOP_summary_stats$Total_GLP1RA_OOP_BL)
+summary(unique_for_GLP1RA_OOP_summary_stats$Total.OOP.ex.PME)
+summary(unique_for_GLP1RA_OOP_summary_stats$Total.Non.Hypo.OOP)
+summary(unique_for_GLP1RA_OOP_summary_stats$Total.Non.GLP1RA.hypo.OOP)
+```
+
+```{r}
+#total OOP excluding PME
+summary_panel_1_BL_SGLT2i <- BL_SGLT2i_OOP %>%
+  left_join(service_summary,  suffix= c("", ".ss")) %>%
+  group_by(BASEID) %>%
+  mutate(Total.OOP.ex.PME = (PAMTOOP-AAMTOOP))
+
+#TOTAL non-hypoglycemic PME OOP
+summary_panel_2_BL_SGLT2i <- summary_panel_1_BL_SGLT2i %>%
+
+  group_by(BASEID) %>%
+  mutate(Total.Non.Hypo.OOP = (AAMTOOP -  Total_Hypoglycemics_OOP ))
+
+#other hypoglycemic PME OOP 
+summary_panel_3_BL_SGLT2i <- summary_panel_2_BL_SGLT2i %>%
+  group_by(BASEID) %>%
+  mutate(Total.Non.SGLT2i.hypo.OOP = (Total_Hypoglycemics_OOP - Total_SGLT2i_OOP_BL))
+
+confirm_SGLT2i_OOP_adds<-summary_panel_3_BL_SGLT2i %>% select(BASEID, SURVEYYR, Total_SGLT2i_OOP_BL, Total.OOP.ex.PME, Total.Non.Hypo.OOP, Total.Non.SGLT2i.hypo.OOP) %>% distinct(BASEID, .keep_all = TRUE)
+```
+
+```{r}
+unique_for_SGLT2i_OOP_summary_stats<-summary_panel_3_BL_SGLT2i %>% distinct(BASEID, .keep_all = TRUE)
+
+summary(unique_for_SGLT2i_OOP_summary_stats$Total_SGLT2i_OOP_BL)
+summary(unique_for_SGLT2i_OOP_summary_stats$Total.OOP.ex.PME)
+summary(unique_for_SGLT2i_OOP_summary_stats$Total.Non.Hypo.OOP)
+summary(unique_for_SGLT2i_OOP_summary_stats$Total.Non.SGLT2i.hypo.OOP)
+```
+##create the outcome OOP variables for the target drugs
+```{r}
+#create the outcome OOP variables for the target drugs 
+OC_GLP1RA_OOP <- OC_GLP1RA_days %>% #OOP GLP1RA
+  filter(GLP1RA == "1") %>%
+  group_by(BASEID) %>%
+  mutate(Total_GLP1RA_OOP_OC = sum(AMTOOP, na.rm = TRUE))
+
+OC_SGLT2i_OOP <- OC_SGLT2i_days %>% #OOP SGLT2i
+  filter(SGLT2i == "1") %>%
+  group_by(BASEID) %>%
+  mutate(Total_SGLT2i_OOP_OC = sum(AMTOOP, na.rm = TRUE))
+```
+
+#PDC SETUP
+```{r}
+# For GLP1RA
+GLP1RA_lookup <- OC_GLP1RA_OOP %>%
+  select(BASEID, GLP1RA_period_end_date_OC) %>%
+  distinct()
+
+# Add GLP1RA_outcome_end to BL_GLP1RA_days using the lookup table
+BL_GLP1RA_days_1 <- summary_panel_3_BL_GLP1RA %>%
+  left_join(GLP1RA_lookup, by = "BASEID")
+
+#Add an identifier column to distinguish BL and OC data
+#create the 2 year supply before binding rows 
+BL_GLP1RA_days_2 <- BL_GLP1RA_days_1 %>%
+  mutate(Source = "BL", GLP1RA_2yr_supply = GLP1RA_Supply_BL)
+
+BL_GLP1RA_BASEIDS <- BL_GLP1RA_days_1 %>%
+  pull(BASEID) %>%
+  unique()
+
+OC_GLP1RA_days_2 <- OC_GLP1RA_OOP %>%
+  mutate(Source = "OC", GLP1RA_2yr_supply = GLP1RA_Supply_OC) %>% filter(BASEID %in% BL_GLP1RA_BASEIDS)
+```
+
+```{r}
+#select only the variables we need 
+BL_GLP1RA_small<-BL_GLP1RA_days_2%>%  select(c("BASEID","SERV_DT","GLP1RA_end_date" ,"DAYSUPP", "GLP1RA", "H_DOD", "BL_yr_GLP1RA", "GLP1RA_excess"))
+
+OC_GLP1RA_small<-OC_GLP1RA_days_2%>%  select(c("BASEID","SERV_DT" ,"DAYSUPP" , "H_DOD", "GLP1RA", "GLP1RA_period_end_date_OC"))
+```
+
+```{r}
+# Bind rows from both sources
+GLP1RA_PDC_join <- bind_rows(BL_GLP1RA_small, OC_GLP1RA_small) %>%
+  group_by(BASEID) %>%
+  filter(GLP1RA == "1") %>%
+  mutate(
+    GLP1RA_outcome_end = coalesce(
+      as.Date(GLP1RA_period_end_date_OC, format = "%Y-%m-%d"), as.Date(
+      ifelse(
+        !is.na(H_DOD) & as.numeric(format(as.Date(H_DOD, format = "%Y-%m-%d"), "%Y")) == BL_yr_GLP1RA + 1,
+        as.Date(H_DOD, format = "%Y-%m-%d"),
+        as.Date(paste(BL_yr_GLP1RA + 1, "-12-31", sep = ""), format = "%Y-%m-%d")
+      ))),  Max_GLP1RA_2yr_denominator = as.integer(difftime(GLP1RA_outcome_end, min(SERV_DT, na.rm = TRUE), units = "days")) + 1)
+```
+
+```{r}
+GLP1RA_PDC_join_1 <- GLP1RA_PDC_join  %>%
+  filter(GLP1RA == "1") %>%
+  filter(any(!is.na(SERV_DT))) %>% # Filter out those with completely missing service dates 
+  mutate(
+    
+    GLP1RA_end_date= SERV_DT + DAYSUPP -1,
+    
+    GLP1RA_2yr_excess= ifelse(GLP1RA_end_date>GLP1RA_outcome_end, difftime(GLP1RA_end_date, GLP1RA_outcome_end, units = "days") , 0 ),
+    GLP1RA_DAYSUPP_2yr_adj= DAYSUPP -  GLP1RA_2yr_excess
+  )
+```
+```{r}
+# For SGLT2i
+SGLT2i_lookup <- OC_SGLT2i_OOP %>%
+  select(BASEID, SGLT2i_period_end_date_OC) %>%
+  distinct()
+
+# Add SGLT2i_outcome_end to BL_SGLT2i_days using the lookup table
+BL_SGLT2i_days_1 <- summary_panel_3_BL_SGLT2i %>%
+  left_join(SGLT2i_lookup, by = "BASEID")
+
+#Add an identifier column to distinguish BL and OC data
+
+BL_SGLT2i_days_2 <- BL_SGLT2i_days_1 %>%
+  mutate(Source = "BL", SGLT2i_2yr_supply = SGLT2i_Supply_BL)
+
+BL_SGLT2i_BASEIDS <- BL_SGLT2i_days_1 %>%
+  pull(BASEID) %>%
+  unique()
+
+OC_SGLT2i_days_2 <- OC_SGLT2i_OOP %>% mutate(Source = "OC", SGLT2i_2yr_supply = SGLT2i_Supply_OC) %>% filter(BASEID %in% BL_SGLT2i_BASEIDS)
+```
+
+```{r}
+#create the 2 year supply before binding rows 
+BL_SGLT2i_small<-BL_SGLT2i_days_2%>%  select(c("BASEID","SERV_DT","SGLT2i_end_date" ,"DAYSUPP", "SGLT2i", "H_DOD", "BL_yr_SGLT2i", "SGLT2i_excess"))
+
+OC_SGLT2i_small<-OC_SGLT2i_days_2%>%  select(c("BASEID","SERV_DT" ,"DAYSUPP" , "H_DOD", "SGLT2i", "SGLT2i_period_end_date_OC"))
+```
+
+```{r}
+# Bind rows from both sources
+SGLT2i_PDC_join <- bind_rows(BL_SGLT2i_small, OC_SGLT2i_small)  %>%
+  group_by(BASEID) %>%
+  filter(SGLT2i == "1") %>%
+  mutate(
+    SGLT2i_outcome_end = coalesce(
+      as.Date(SGLT2i_period_end_date_OC, format = "%Y-%m-%d"), as.Date(
+      ifelse(
+        !is.na(H_DOD) & as.numeric(format(as.Date(H_DOD, format = "%Y-%m-%d"), "%Y")) == BL_yr_SGLT2i + 1,
+        as.Date(H_DOD, format = "%Y-%m-%d"),
+        as.Date(paste(BL_yr_SGLT2i + 1, "-12-31", sep = ""), format = "%Y-%m-%d")
+      ) ) ),
+      Max_SGLT2i_2yr_denominator = as.integer(difftime(SGLT2i_outcome_end, min(SERV_DT, na.rm = TRUE), units = "days")) + 1) 
+```
+
+```{r}
+SGLT2i_PDC_join_1 <- SGLT2i_PDC_join  %>%
+  filter(SGLT2i == "1") %>%
+  filter(any(!is.na(SERV_DT))) %>% # Filter out those with completely missing service dates 
+  mutate(
+    SGLT2i_end_date= SERV_DT + DAYSUPP -1,
+    SGLT2i_2yr_excess= ifelse(SGLT2i_end_date>SGLT2i_outcome_end, difftime(SGLT2i_end_date, SGLT2i_outcome_end, units = "days") , 0 ),
+    SGLT2i_DAYSUPP_2yr_adj= DAYSUPP -  SGLT2i_2yr_excess
+  )
+```
+
+#PDC-GLP1RA 
+## 2 year
+```{r}
+#add 0 supply row at year end 
+
+# Identify the BASEIDs that have at least one row with GLP1RA == 1
+baseids_with_glp1ra_2yr <- GLP1RA_PDC_join_1 %>%
+  filter(GLP1RA == "1") %>%
+  distinct(BASEID, GLP1RA_outcome_end)
+
+# Create the new rows to be added
+year_end_rows_GLP1RA_2yr <- baseids_with_glp1ra_2yr %>%
+  mutate(SERV_DT = GLP1RA_outcome_end, GLP1RA_DAYSUPP_2yr_adj = 0, GLP1RA = 1)
+
+# Combine the original data with the new rows
+GLP1RA_PDC_join_updated <- GLP1RA_PDC_join_1 %>%
+  bind_rows(year_end_rows_GLP1RA_2yr)  %>% arrange(SERV_DT)
+```
+
+```{r}
+#2yr PDC
+GLP1RA_2yrPDC_tibble<-GLP1RA_PDC_join_updated %>% 
+  filter(GLP1RA == "1") %>%
+  group_by(BASEID) %>% 
+  propagate_date(.date = SERV_DT, .days_supply = GLP1RA_DAYSUPP_2yr_adj) %>% 
+  identify_gaps() 
+
+GLP1RA_2yrPDC_tibble %>%  arrange(date) %>% filter(BASEID == "02132007") %>% select(c("BASEID", "DAYSUPP", "date", "days_supply","adjusted_date" ,"GLP1RA_2yr_excess" ,"Max_GLP1RA_2yr_denominator" ,"gap","H_DOD","GLP1RA_outcome_end"))
+
+# Then, summarize the total gap by BASEID
+total_gap_GLP1RA_2yrPDC_table <- GLP1RA_2yrPDC_tibble %>% group_by(BASEID) %>%  dplyr::summarize(total_gap_GLP1RA_2yrPDC = sum(gap, na.rm = TRUE))
+
+# View the result
+total_gap_GLP1RA_2yrPDC_table
+```
+
+```{r}
+GLP1RA_PDC_join_updated_2yr <- GLP1RA_PDC_join_updated %>%
+  left_join(total_gap_GLP1RA_2yrPDC_table %>% select(BASEID, total_gap_GLP1RA_2yrPDC), by = "BASEID") %>%
+  mutate(
+    GLP1RA_PDC_denom_2yr = Max_GLP1RA_2yr_denominator ,  # Create new column for days
+    GLP1RA_PDC_num_2yr = Max_GLP1RA_2yr_denominator-total_gap_GLP1RA_2yrPDC -1  
+  )
+```
+
+## 1 yr
+```{r}
+# Identify the BASEIDs that have at least one row with GLP1RA == 1
+baseids_with_glp1ra <- summary_panel_3_BL_GLP1RA %>%
+  filter(GLP1RA == "1") %>%
+  distinct(BASEID, yr_end_BL_GLP1RA)
+```
+
+```{r}
+# Create the 0 supply row at year end 
+year_end_rows_GLP1RA <- baseids_with_glp1ra %>%
+  mutate(SERV_DT = yr_end_BL_GLP1RA, GLP1RA_DAYSUPP_adj = 0, GLP1RA = 1)
+
+# Combine the original data with the new rows
+BL_GLP1RA_supp_updated <- summary_panel_3_BL_GLP1RA %>%
+  bind_rows(year_end_rows_GLP1RA)  # Optional: arrange the data by BASEID and service date
+```
+
+```{r}
+GLP1RA_BL_PDC_tibble<-BL_GLP1RA_supp_updated %>% 
+  filter(GLP1RA == "1") %>%
+  group_by(BASEID) %>% 
+  propagate_date(.date = SERV_DT, .days_supply = GLP1RA_DAYSUPP_adj) %>% 
+  identify_gaps() 
+
+GLP1RA_BL_PDC_tibble %>%  filter(BASEID == "02132007") %>% select(c("BASEID", "DAYSUPP", "date", "days_supply","adjusted_date" ,"GLP1RA_excess"  ,"gap","H_DOD"))
+
+# Then, summarize the total gap by BASEID
+total_gap_GLP1RA_BL_PDC_table <- GLP1RA_BL_PDC_tibble %>%
+  group_by(BASEID) %>%
+   dplyr::summarize(total_gap_GLP1RA_BL_PDC = sum(gap, na.rm = TRUE))
+
+# View the result
+total_gap_GLP1RA_BL_PDC_table
+```
+```{r}
+BL_GLP1RA_PDC_updated_1 <- BL_GLP1RA_supp_updated %>%
+  left_join(total_gap_GLP1RA_BL_PDC_table %>% select(BASEID, total_gap_GLP1RA_BL_PDC), by = "BASEID") %>%
+  mutate(
+    GLP1RA_PDC_denom_BL = GLP1RA_days_denom_BL ,  # Create new column for days
+    GLP1RA_PDC_num_BL = GLP1RA_days_denom_BL-total_gap_GLP1RA_BL_PDC -1  # Create new column for supply
+  )
+```
+
+## Finalaze 1 and 2 year PDC, and outcome measures
+```{r}
+BL_GLP1RA_PDC_1_row <- BL_GLP1RA_PDC_updated_1 %>%
+  group_by(BASEID) %>%
+  mutate(
+    GLP1RA_PDC_denom_BL = max(GLP1RA_PDC_denom_BL, na.rm = TRUE),
+    GLP1RA_PDC_num_BL = max(GLP1RA_PDC_num_BL, na.rm = TRUE)
+  ) %>%
+  slice(1) %>%
+  select("BASEID", "GLP1RA_PDC_denom_BL", "GLP1RA_PDC_num_BL")
+
+GLP1RA_PDC_join_updated_2yr_1row <- GLP1RA_PDC_join_updated_2yr %>%
+  group_by(BASEID) %>%
+  mutate(
+     GLP1RA_PDC_denom_2yr = max(as.numeric(GLP1RA_PDC_denom_2yr), na.rm = TRUE),
+    GLP1RA_PDC_num_2yr = max(as.numeric(GLP1RA_PDC_num_2yr), na.rm = TRUE)
+  ) %>%
+  slice(1) %>%
+  select(BASEID, GLP1RA_PDC_denom_2yr, GLP1RA_PDC_num_2yr)
+```
+
+```{r}
+OC_GLP1RA_PDC_updated<-left_join(BL_GLP1RA_PDC_1_row, GLP1RA_PDC_join_updated_2yr_1row) %>% mutate(
+  GLP1RA_PDC_denom_OC= GLP1RA_PDC_denom_2yr - GLP1RA_PDC_denom_BL,
+  GLP1RA_PDC_num_OC= GLP1RA_PDC_num_2yr - GLP1RA_PDC_num_BL  
+)%>% select("BASEID", "GLP1RA_PDC_denom_OC", "GLP1RA_PDC_num_OC")
+```
+
+#PDC-SGLT2i 
+## 2 year
+```{r}
+#add 0 supply row at year end 
+
+# Identify the BASEIDs that have at least one row with SGLT2i == 1
+baseids_with_SGLT2i_2yr <- SGLT2i_PDC_join_1 %>%
+  filter(SGLT2i == "1") %>%
+  distinct(BASEID, SGLT2i_outcome_end)
+
+# Create the new rows to be added
+year_end_rows_SGLT2i_2yr <- baseids_with_SGLT2i_2yr %>%
+  mutate(SERV_DT = SGLT2i_outcome_end, SGLT2i_DAYSUPP_2yr_adj = 0, SGLT2i = 1)
+
+# Combine the original data with the new rows
+SGLT2i_PDC_join_updated <- SGLT2i_PDC_join_1 %>%
+  bind_rows(year_end_rows_SGLT2i_2yr)  %>% arrange(SERV_DT)
+```
+
+```{r}
+#2yr PDC
+SGLT2i_2yrPDC_tibble<-SGLT2i_PDC_join_updated %>% 
+  filter(SGLT2i == "1") %>%
+  group_by(BASEID) %>% 
+  propagate_date(.date = SERV_DT, .days_supply = SGLT2i_DAYSUPP_2yr_adj) %>% 
+  identify_gaps() 
+
+SGLT2i_2yrPDC_tibble%>% filter(BASEID == "01708352")
+
+# Then, summarize the total gap by BASEID
+total_gap_SGLT2i_2yrPDC_table <- SGLT2i_2yrPDC_tibble %>%
+  group_by(BASEID) %>%
+  dplyr::summarize(total_gap_SGLT2i_2yrPDC = sum(gap, na.rm = TRUE))
+
+# View the result
+total_gap_SGLT2i_2yrPDC_table
+```
+
+```{r}
+as.integer(difftime(as.Date("2018-12-31"), as.Date("2017-01-01"	), units = "days")) + 1
+```
+
+```{r}
+SGLT2i_PDC_join_updated_2yr <- SGLT2i_PDC_join_updated %>%
+  left_join(total_gap_SGLT2i_2yrPDC_table %>% select(BASEID, total_gap_SGLT2i_2yrPDC), by = "BASEID") %>%
+  mutate(
+    SGLT2i_PDC_denom_2yr = Max_SGLT2i_2yr_denominator ,  # Create new column for days
+    SGLT2i_PDC_num_2yr = Max_SGLT2i_2yr_denominator-total_gap_SGLT2i_2yrPDC -1  # Create new column for supply
+  )
+```
+
+## 1 yr
+```{r}
+# Identify the BASEIDs that have at least one row with SGLT2i == 1
+baseids_with_SGLT2i <- summary_panel_3_BL_SGLT2i %>%
+  filter(SGLT2i == "1") %>%
+  distinct(BASEID, yr_end_BL_SGLT2i)
+```
+
+```{r}
+# Create the 0 supply row at year end 
+year_end_rows_SGLT2i <- baseids_with_SGLT2i %>%
+  mutate(SERV_DT = yr_end_BL_SGLT2i, SGLT2i_DAYSUPP_adj = 0, SGLT2i = 1)
+
+# Combine the original data with the new rows
+BL_SGLT2i_supp_updated <- summary_panel_3_BL_SGLT2i %>%
+  bind_rows(year_end_rows_SGLT2i)  # Optional: arrange the data by BASEID and service date
+```
+
+```{r}
+SGLT2i_BL_PDC_tibble<-BL_SGLT2i_supp_updated %>% 
+  filter(SGLT2i == "1") %>%
+  group_by(BASEID) %>% 
+  propagate_date(.date = SERV_DT, .days_supply = SGLT2i_DAYSUPP_adj) %>% 
+  identify_gaps() 
+
+# Then, summarize the total gap by BASEID
+total_gap_SGLT2i_BL_PDC_table <- SGLT2i_BL_PDC_tibble %>%
+  group_by(BASEID) %>%
+  dplyr::summarize(total_gap_SGLT2i_BL_PDC = sum(gap, na.rm = TRUE))
+
+# View the result
+total_gap_SGLT2i_BL_PDC_table
+```
+```{r}
+BL_SGLT2i_PDC_updated_1 <- BL_SGLT2i_supp_updated %>%
+  left_join(total_gap_SGLT2i_BL_PDC_table %>% select(BASEID, total_gap_SGLT2i_BL_PDC), by = "BASEID") %>%
+  mutate(
+    SGLT2i_PDC_denom_BL = SGLT2i_days_denom_BL ,  # Create new column for days
+    SGLT2i_PDC_num_BL = SGLT2i_days_denom_BL-total_gap_SGLT2i_BL_PDC -1 # Create new column for supply
+  )
+```
+## Finalaze 1 and 2 year PDC, and outcome measures
+```{r}
+BL_SGLT2i_PDC_1_row <- BL_SGLT2i_PDC_updated_1 %>%
+  group_by(BASEID) %>%
+  mutate(
+    SGLT2i_PDC_denom_BL = max(SGLT2i_PDC_denom_BL, na.rm = TRUE),
+    SGLT2i_PDC_num_BL = max(SGLT2i_PDC_num_BL, na.rm = TRUE)
+  ) %>%
+  slice(1) %>%
+  select("BASEID", "SGLT2i_PDC_denom_BL", "SGLT2i_PDC_num_BL")
+
+SGLT2i_PDC_join_updated_2yr_1row <- SGLT2i_PDC_join_updated_2yr %>%
+  group_by(BASEID) %>%
+  mutate(
+     SGLT2i_PDC_denom_2yr = max(as.numeric(SGLT2i_PDC_denom_2yr), na.rm = TRUE),
+    SGLT2i_PDC_num_2yr = max(as.numeric(SGLT2i_PDC_num_2yr), na.rm = TRUE)
+  ) %>%
+  slice(1) %>%
+  select(BASEID, SGLT2i_PDC_denom_2yr, SGLT2i_PDC_num_2yr)
+```
+
+```{r}
+OC_SGLT2i_PDC_updated<-left_join(BL_SGLT2i_PDC_1_row, SGLT2i_PDC_join_updated_2yr_1row) %>% mutate(
+  SGLT2i_PDC_denom_OC= SGLT2i_PDC_denom_2yr - SGLT2i_PDC_denom_BL,
+  SGLT2i_PDC_num_OC= SGLT2i_PDC_num_2yr - SGLT2i_PDC_num_BL
+)%>% select("BASEID", "SGLT2i_PDC_denom_OC", "SGLT2i_PDC_num_OC")
+```
+
+#Adjust supply and days covered by the carryover days for MPR 
+## GLP1RA
+```{r}
+#For GLP1RA baseline supply
+#need to subtract the BL extra days from the baseline supply to create the final BL supply 
+BL_GLP1RA_final<- summary_panel_3_BL_GLP1RA %>%
+  group_by(BASEID) %>%
+  mutate(Final_GLP1RA_Supply_BL = max(total_GLP1RA_DAYSUPP_adj_BL , na.rm = TRUE))
+```
+
+```{r}
+#For GLP1RA outcome supply
+##need to add the BL extra days and subtract the OC extra days 
+GLP1RA_extra_days_dataset_BL1<-summary_panel_3_BL_GLP1RA%>% select(BASEID,GLP1RA_carryover_suppy_BL )
+
+#grab the extra days from BL
+ GLP1RA_extra_days_supply_dataset_BL<- GLP1RA_extra_days_dataset_BL1 %>% group_by(BASEID) %>%
+  slice_max(order_by = GLP1RA_carryover_suppy_BL , n = 1, with_ties = FALSE)
+```
+
+```{r}
+#join BL extra days with outcome
+OC_GLP1RA_supp_1<-left_join(OC_GLP1RA_OOP, GLP1RA_extra_days_supply_dataset_BL)
+
+#add the BL extra days and subtract the OC extra days 
+OC_GLP1RA_final_1 <- OC_GLP1RA_supp_1 %>% #total GLP1RA supply
+  filter(GLP1RA == "1") %>%
+  group_by(BASEID) %>%
+  mutate(Final_GLP1RA_Supply_OC = total_GLP1RA_DAYSUPP_adj_OC  +  ifelse(all(is.na(GLP1RA_carryover_suppy_BL)), 0, max(GLP1RA_carryover_suppy_BL, na.rm = TRUE)))
+
+#fill the final GLP1RA supply for each baseid with the max for that baseid
+OC_GLP1RA_final<- OC_GLP1RA_final_1 %>%
+  group_by(BASEID) %>%
+  mutate(Final_GLP1RA_Supply_OC = max(Final_GLP1RA_Supply_OC, na.rm = TRUE))
+```
+```{r}
+OC_GLP1RA_final%>% filter(BASEID == "02132007") %>% arrange(SERV_DT) %>%select(BASEID,PANEL,SERV_DT,"Final_GLP1RA_Supply_OC" ,"total_GLP1RA_DAYSUPP_adj_OC", "GLP1RA_DAYSUPP_adj_OC","DAYSUPP","GLP1RA_period_end_date_OC","GLP1RA_end_date_OC", "yr_end_OC_GLP1RA" ,"GLP1RA_excess_OC", GLP1RA_carryover_suppy_BL )
+```
+
+## SGLT 
+```{r}
+#For SGLT2i baseline supply
+#need to subtract the BL extra days from the baseline supply to create the final BL supply for MPR
+BL_SGLT2i_final<- summary_panel_3_BL_SGLT2i %>%
+  group_by(BASEID) %>%
+  mutate(Final_SGLT2i_Supply_BL = max(total_SGLT2i_DAYSUPP_adj_BL , na.rm = TRUE))
+```
+
+```{r}
+#For SGLT2i outcome supply
+##need to add the BL extra days and subtract the OC extra days 
+SGLT2i_extra_days_dataset_BL1<-summary_panel_3_BL_SGLT2i%>% select(BASEID, SGLT2i_carryover_suppy_BL )
+
+#grab the extra days from BL
+ SGLT2i_extra_days_supply_dataset_BL<- SGLT2i_extra_days_dataset_BL1 %>% group_by(BASEID) %>%
+  slice_max(order_by = SGLT2i_carryover_suppy_BL , n = 1, with_ties = FALSE)
+
+#join BL extra days with outcome
+OC_SGLT2i_supp_1<-left_join(OC_SGLT2i_OOP, SGLT2i_extra_days_supply_dataset_BL)
+
+#add the BL extra days and subtract the OC extra days 
+OC_SGLT2i_final_1 <- OC_SGLT2i_supp_1 %>% #total SGLT2i supply
+  filter(SGLT2i == "1") %>%
+  group_by(BASEID) %>%
+  mutate(Final_SGLT2i_Supply_OC = total_SGLT2i_DAYSUPP_adj_OC  +  ifelse(all(is.na(SGLT2i_carryover_suppy_BL)), 0, max(SGLT2i_carryover_suppy_BL, na.rm = TRUE)))
+
+#fill the final SGLT2i supply for each baseid with the max for that baseid
+OC_SGLT2i_final<- OC_SGLT2i_final_1 %>%
+  group_by(BASEID) %>%
+  mutate(Final_SGLT2i_Supply_OC = max(Final_SGLT2i_Supply_OC, na.rm = TRUE))
+OC_SGLT2i_final
+```
+```{r}
+mean(BL_GLP1RA_PDC_1_row$GLP1RA_PDC_num_BL)
+mean(BL_GLP1RA_final$Final_GLP1RA_Supply_BL)
+mean(BL_SGLT2i_PDC_1_row$SGLT2i_PDC_num_BL)
+mean(BL_SGLT2i_final$Final_SGLT2i_Supply_BL)
+
+mean(OC_GLP1RA_PDC_updated$GLP1RA_PDC_num_OC)
+mean(OC_GLP1RA_final$Final_GLP1RA_Supply_OC)
+mean(OC_SGLT2i_PDC_updated$SGLT2i_PDC_num_OC)
+mean(OC_SGLT2i_final$Final_SGLT2i_Supply_OC)
+```
+# merge PDC variables with dataframe
+```{r}
+#merge PDC variables
+nrow(BL_GLP1RA_final)
+BL_GLP1RA_all <- left_join(BL_GLP1RA_final, BL_GLP1RA_PDC_1_row, by = "BASEID")
+
+OC_GLP1RA_all <- left_join(OC_GLP1RA_final, OC_GLP1RA_PDC_updated, by = "BASEID")
+
+BL_SGLT2i_all <- left_join(BL_SGLT2i_final, BL_SGLT2i_PDC_1_row, by = "BASEID")
+
+OC_SGLT2i_all <- left_join(OC_SGLT2i_final, OC_SGLT2i_PDC_updated, by = "BASEID")
+
+nrow(BL_GLP1RA_final)
+```
+
+```{r}
+summary(BL_GLP1RA_all$Final_GLP1RA_Supply_BL)
+summary(BL_GLP1RA_all$max_GLP1RA_BL_days_denom)
+head(BL_GLP1RA_final,100)
+
+summary(BL_SGLT2i_all$Final_SGLT2i_Supply_BL)
+summary(BL_SGLT2i_all$max_SGLT2i_BL_days_denom)
+head(BL_SGLT2i_all,100)
+
+combined_baseids <- c(BL_GLP1RA_all$BASEID, BL_SGLT2i_all$BASEID)
+length(unique(combined_baseids))
+```
+
+```{r}
+summary(BL_GLP1RA_all$GLP1RA_PDC_num_BL)
+summary(BL_GLP1RA_all$GLP1RA_PDC_denom_BL)
+head(BL_GLP1RA_all,100)
+
+summary(BL_SGLT2i_all$SGLT2i_PDC_num_BL)
+summary(BL_SGLT2i_all$SGLT2i_PDC_denom_BL)
+head(BL_SGLT2i_all,100)
+```
+
+```{r}
+summary(BL_SGLT2i_all$Final_SGLT2i_Supply_BL)
+summary(BL_SGLT2i_all$max_SGLT2i_BL_days_denom)
+head(BL_SGLT2i_all,100)
+
+
+combined_baseids <- c(BL_GLP1RA_all$BASEID, BL_SGLT2i_all$BASEID)
+length(unique(combined_baseids))
+```
+
+#slice each dataframe so that there is only one row for each BASEID
+```{r}
+#this counts the unique BASEIDS for the different numerators and denominators at BL
+length(unique(BL_SGLT2i_all$BASEID))
+length(unique(BL_GLP1RA_all$BASEID))
+
+summary(BL_GLP1RA_all$Final_GLP1RA_Supply_BL)
+summary(BL_SGLT2i_all$Final_SGLT2i_Supply_BL)
+```
+
+```{r}
+#slice each dataframe so that there is only one row for each BASEID
+#the BL will be larger than the OC because those with 0 OC target drug fills are not currently included in the OC population. When we joing the BL and OC later, we left_join to keep all BL fills, and fill the OC supply with 0 for those with 0 OC fills
+
+GLP1RA_BL<- BL_GLP1RA_all %>%
+  group_by(BASEID) %>%
+  slice(1)
+
+nrow(GLP1RA_BL)
+
+SGLT2i_BL<- BL_SGLT2i_all %>%
+  group_by(BASEID) %>%
+  slice(1)
+
+nrow(SGLT2i_BL)
+
+GLP1RA_OC<- OC_GLP1RA_all %>%
+  group_by(BASEID) %>%
+  slice(1)
+
+nrow(GLP1RA_OC)
+
+SGLT2i_OC<- OC_SGLT2i_all %>%
+  group_by(BASEID) %>%
+  slice(1)
+
+nrow(SGLT2i_OC)
+```
+
+# create MPRs 
+```{r}
+#this looks at the summary statistics for the BL PDC numerator (drug supply) and the PDC denominator(days in period) after slicing to one row for each baseid 
+summary(GLP1RA_BL$Final_GLP1RA_Supply_BL)
+summary(GLP1RA_BL$max_GLP1RA_BL_days_denom)
+
+summary(SGLT2i_BL$Final_SGLT2i_Supply_BL)
+summary(SGLT2i_BL$max_SGLT2i_BL_days_denom)
+```
+```{r}
+#Create BL MPR variables for GLP1RA
+GLP1RA_BL$MPR_GLP1RA_BL<- GLP1RA_BL$Final_GLP1RA_Supply_BL / GLP1RA_BL$max_GLP1RA_BL_days_denom 
+```
+
+```{r}
+#create MPR variable for SGLT2i
+SGLT2i_BL$MPR_SGLT2i_BL<- SGLT2i_BL$Final_SGLT2i_Supply_BL / SGLT2i_BL$max_SGLT2i_BL_days_denom #create 
+```
+
+```{r}
+#Look at summary statistics and boxplot for the GLP1RA and SGLT2i MPRs
+summary(GLP1RA_BL$MPR_GLP1RA_BL)
+boxplot(GLP1RA_BL$MPR_GLP1RA_BL)
+quantile(GLP1RA_BL$MPR_GLP1RA_BL, c(0.1, .9))
+
+summary(SGLT2i_BL$MPR_SGLT2i_BL)
+boxplot(SGLT2i_BL$MPR_SGLT2i_BL)
+quantile(SGLT2i_BL$MPR_SGLT2i_BL, c(0.1, .9))
+```
+
+```{r}
+#this looks at the summary statistics for the BL MPR numerator (drug supply) and the MPR denominator(days in period) after slicing to one row for each baseid 
+summary(SGLT2i_OC$Final_SGLT2i_Supply_OC)
+nrow(SGLT2i_OC)
+summary(SGLT2i_OC$max_SGLT2i_OC_days_denom)
+
+summary(GLP1RA_OC$Final_GLP1RA_Supply_OC)
+summary(GLP1RA_OC$max_GLP1RA_OC_days_denom)
+```
+
+```{r}
+#Create OC MPR variables for GLP1RA
+GLP1RA_OC$MPR_GLP1RA_OC<- GLP1RA_OC$Final_GLP1RA_Supply_OC / GLP1RA_OC$max_GLP1RA_OC_days_denom 
+```
+
+```{r}
+#create OC MPR variable for SGLT2i
+SGLT2i_OC$MPR_SGLT2i_OC<- SGLT2i_OC$Final_SGLT2i_Supply_OC / SGLT2i_OC$max_SGLT2i_OC_days_denom #create MPR variable for SGLT2i
+```
+
+# create PDCs
+```{r}
+#this looks at the summary statistics for the BL PDC numerator (drug supply) and the PDC denominator(days in period) after slicing to one row for each baseid 
+summary(SGLT2i_BL$SGLT2i_PDC_num_BL)
+summary(SGLT2i_BL$SGLT2i_PDC_denom_BL)
+summary(GLP1RA_BL$GLP1RA_PDC_num_BL)
+summary(GLP1RA_BL$GLP1RA_PDC_denom_BL)
+```
+
+```{r}
+#Create BL PDC variables for GLP1RA
+GLP1RA_BL$PDC_GLP1RA_BL<- GLP1RA_BL$GLP1RA_PDC_num_BL / GLP1RA_BL$GLP1RA_PDC_denom_BL 
+
+SGLT2i_BL$PDC_SGLT2i_BL<- SGLT2i_BL$SGLT2i_PDC_num_BL / SGLT2i_BL$SGLT2i_PDC_denom_BL
+```
+
+```{r}
+#GLP1RA w/  PDL boxplot
+summary(GLP1RA_BL$PDC_GLP1RA_BL)
+boxplot(GLP1RA_BL$PDC_GLP1RA_BL)
+
+#SGLT2i w/  PDL boxplot
+summary(SGLT2i_BL$PDC_SGLT2i_BL)
+boxplot(SGLT2i_BL$PDC_SGLT2i_BL)
+```
+```{r}
+are_equal <- all(SGLT2i_OC$SGLT2i_PDC_num_OC == SGLT2i_OC$Final_SGLT2i_Supply_OC)
+
+# Print the result
+if (are_equal) {
+  print("The columns are always equal in every row.")
+} else {
+  print("The columns are not always equal in every row.")
+}
+```
+```{r}
+setwd("H:/MCBS_R_objects")
+
+saveRDS(GLP1RA_OC, file = "GLP1RA_OC.rds")
+saveRDS(GLP1RA_BL, file = "GLP1RA_BL.rds")
+saveRDS(SGLT2i_BL, file = "SGLT2i_BL.rds")
+saveRDS(SGLT2i_OC, file = "SGLT2i_OC.rds")
+```
+
+```{r}
+knitr::purl("MCBS_meds_variable_creation_1-13-25.rmd")
+```

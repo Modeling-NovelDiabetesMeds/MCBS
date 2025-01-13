@@ -1,0 +1,2502 @@
+---
+title: "MCBS_analysis_1_7_25"
+author: "Nicklas Klepser"
+date: "2023-12-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r , echo=FALSE, message=FALSE}
+library(RODBC)
+library(epitools)
+library(dsrTest)
+library(knitr)
+library(rvest)
+library(readxl)
+library(stringdist)
+library(dplyr)
+library(writexl)
+library(reshape)
+library(survival)
+library(mstate)
+library(foreign)
+library(haven)
+library(ggplot2)
+library(mosaic)
+library(lessR)
+library(sjlabelled)
+library(rlang)
+library(tidyverse)
+library(survey)
+library(gtsummary)
+library(utils)
+library(tidyr)
+library(rms)
+library(jtools)
+library(patchwork)
+library(gridExtra)
+library(ggsci)
+library(viridis)
+library(openxlsx)
+library(broom)
+library(gridExtra)
+library(ggpubr)
+library(openxlsx)
+library(broom)
+library(ggpubr)
+```
+
+#create target drug lists 
+```{r}
+#create the target drug lists 
+  GLP1RA_generics_list<- list("Lixisenatide","Liraglutide", "Semaglutide", "Exenatide", "Albiglutide", "Dulaglutide", "Efpeglenatide", "INSULIN GLARGINE/LIXISENATIDE", "EXENATIDE MICROSPHERES", "insulin degludec/liraglutide", "INSULIN GLARGINE/LIXISENATIDE")
+GLP1RA_genericsupper<-lapply(GLP1RA_generics_list, toupper)
+GLP1RA_genericslower<-lapply(GLP1RA_generics_list, tolower)
+GLP1RA_generics<- c(GLP1RA_genericslower, GLP1RA_genericsupper)#they either appear as all lowercase or all uppercase
+SGLT2i_generics_list<- list("Empagliflozin", "Dapagliflozin",  "dapagliflozin/metformin HCl", "DAPAGLIFLOZIN PROPANEDIOL", "Canagliflozin", "canagliflozin/metformin HCl" ,"Ertugliflozin", "Sotagliflozin", "EMPAGLIFLOZIN/LINAGLIPTIN", "empagliflozin/metformin HCl", "ertugliflozin pidolate")
+SGLT2i_genericsupper<-lapply(SGLT2i_generics_list, toupper)
+SGLT2i_genericslower<-lapply(SGLT2i_generics_list, tolower)
+SGLT2i_generics<- c(SGLT2i_genericslower, SGLT2i_genericsupper)
+```
+
+#read in the R objects 
+
+```{r}
+#read in the R objects 
+setwd("H:/MCBS_R_objects")
+
+#This is the baseline survey total population, including all of the calculated variables (Charlson, CVD prediction, etc.)
+BL_survey_totalpop<- readRDS("BL_survey_totalpop.rds")
+
+#these are the total diabetes populations including both cost and survey variables 
+BL_total_DM_pop<- readRDS("BL_total_DM_pop.rds")
+OC_total_DM_pop<- readRDS("OC_total_DM_pop.rds")
+
+#these are the total diabetes populations including dummy variables for the target drugs, but not separated out by GLP1RA and SGLT2i 
+BL_total_DM_pop_drug_dummies<- readRDS("BL_total_DM_pop_drug_dummies.rds")
+OC_total_DM_pop_drug_dummies<- readRDS("OC_total_DM_pop_drug_dummies.rds")
+
+complete_BL_total_DM_pop_drug_dummies<- BL_total_DM_pop_drug_dummies
+
+complete_OC_total_DM_pop_drug_dummies<- OC_total_DM_pop_drug_dummies 
+
+#slice this so that there is only 1 row for each baseid. 
+BL_total_DM_pop_drug_dummies <- BL_total_DM_pop_drug_dummies %>%
+  group_by(BASEID) %>%
+  mutate(missing_service_date_TD = if_else( all(is.na(SERV_DT) & (has_GLP1RA_factor == 1 | has_SGLT2i_factor == 1 |  has_GLP1RA==1 | has_SGLT2i==1)), 1, 0),
+         missing_service_date = if_else( all(is.na(SERV_DT)), 1, 0))
+  
+BL_total_DM_pop_drug_dummies<- BL_total_DM_pop_drug_dummies%>%
+group_by(BASEID) %>%
+  slice(1)
+
+
+OC_total_DM_pop_drug_dummies<- OC_total_DM_pop_drug_dummies %>%
+group_by(BASEID) %>%
+  slice(1)
+
+GLP1RA_OC <- readRDS("GLP1RA_OC.rds")
+GLP1RA_BL<- readRDS("GLP1RA_BL.rds")
+SGLT2i_BL<- readRDS("SGLT2i_BL.rds")
+SGLT2i_OC<- readRDS("SGLT2i_OC.rds")
+```
+```{r}
+length(unique(complete_BL_total_DM_pop_drug_dummies$BASEID))
+length(unique(BL_total_DM_pop_drug_dummies$BASEID))
+length(unique(BL_total_DM_pop$BASEID))
+```
+#Fill the PDC denominator (days in period) while accounting for death 
+```{r}
+#The goal of this section is to create a dataframe of just BASEIDs and Panel numbers
+analyze_survey_panel_number<- function(panel){
+demographics_panel_number_t<-as.data.frame(read_sas('demo.sas7bdat')) #demographic variables
+demographics_panel_number<- demographics_panel_number_t %>% select("PANEL", "BASEID") 
+
+panel_number_data<- subset(demographics_panel_number, PANEL %in% c(panel_number_survey) )
+}
+```
+
+```{r}
+#add or subtract years based on the length of the  analysis
+survey_directories_BL <- c(
+  "H:/MCBS/Survey File 2016/Data/SAS Files", 
+  "H:/MCBS/Survey File 2017/Data/SAS Files", 
+  "H:/MCBS/Survey File 2018/Data/SAS Files",   
+  "H:/MCBS/Survey File 2019/Data/SAS Files", 
+  "H:/MCBS/Survey File 2020/Data/SAS Files", 
+  "H:/MCBS/Survey File 2021/Data/SAS Files")
+```
+
+```{r, message=FALSE, warning=FALSE}
+#iterate through the survey baseline directories, and read in and create the dataframe of just baseids and panel numbers using the above function. This is needed to have a dataframe that has both the correct panel number and baseline/outcome year
+all_panel_number_data <- list()
+
+year_survey <- 2016
+panel_number_survey <- 2015
+
+for (panel in survey_directories_BL) {
+  setwd(panel)
+  panel_number_data <- analyze_survey_panel_number(year_survey)
+  
+  # Append the panel data to the list
+  all_panel_number_data[[panel_number_survey]] <- panel_number_data
+  
+  year_survey <- year_survey + 1
+  panel_number_survey <- panel_number_survey + 1
+}
+```
+
+```{r}
+#bind each year's panel number data frame together into a single dataframe encompassing all years of interest
+PANEL_NUMBER<-bind_rows(all_panel_number_data[2015], all_panel_number_data[2016], all_panel_number_data[2017], all_panel_number_data[2018],all_panel_number_data[2019])
+```
+```{r}
+#The goal of this section is to create a dataframe of just BASEIDs and Panel and date of death 
+analyze_survey_panel_number<- function(panel){
+demographics_panel_number_t<-as.data.frame(read_sas('demo.sas7bdat')) #demographic variables
+demographics_panel_number<- demographics_panel_number_t %>% select("PANEL", "BASEID", "H_DOD") 
+panel_number_data<- subset(demographics_panel_number, PANEL %in% c(panel_number_survey) )
+}
+```
+
+```{r}
+#add or subtract years based on the length of the  analysis
+survey_directories_OC <- c(
+  "H:/MCBS/Survey File 2017/Data/SAS Files",
+  "H:/MCBS/Survey File 2018/Data/SAS Files",
+  "H:/MCBS/Survey File 2019/Data/SAS Files",
+  "H:/MCBS/Survey File 2020/Data/SAS Files",
+  "H:/MCBS/Survey File 2021/Data/SAS Files"
+)
+```
+
+```{r, message=FALSE, warning=FALSE}
+#iterate through the survey baseline directories, and read in and create the dataframe of just baseids and panel numbers using the above function
+
+all_panel_number_data <- list()
+year_survey <- 2016
+panel_number_survey <- 2015
+
+for (panel in survey_directories_OC) {
+  setwd(panel)
+  panel_number_data <- analyze_survey_panel_number(year_survey)
+  
+  # Append the panel data to the list
+  all_panel_number_data[[panel_number_survey]] <- panel_number_data
+  
+  year_survey <- year_survey + 1
+  panel_number_survey <- panel_number_survey + 1
+}
+```
+
+```{r}
+#bind each year's panel number data frame together into a single dataframe encompassing all years of interest
+date_of_death<-bind_rows(all_panel_number_data[2015], all_panel_number_data[2016], all_panel_number_data[2017], all_panel_number_data[2018],all_panel_number_data[2019])
+```
+
+```{r}
+#combine the panel numbers and date of death 
+PANEL_NUMBER_and_date_of_death<-left_join(PANEL_NUMBER,date_of_death)
+```
+#joining BL and OC populations
+```{r}
+#left join our BL and OC for our DM population.
+total_DM_population_preweight<- left_join(BL_total_DM_pop_drug_dummies, OC_total_DM_pop_drug_dummies, by= "BASEID" , suffix= c(".b", ".o"),copy=FALSE)
+
+length(unique(total_DM_population_preweight$BASEID))
+```
+```{r}
+#creating a dummy for the diabetes population
+total_DM_population_preweight$diabetes<- 1
+```
+
+```{r}
+#The goal of this section is to create a dataframe of just BASEIDs and Panel numbers so we can ensure that an individuals first full year in MCBS is their baseline and the following year is their outcome period 
+
+analyze_survey_panel_number<- function(panel){
+
+demographics_panel_number_t<-as.data.frame(read_sas('demo.sas7bdat')) #demographic variables
+demographics_panel_number<- demographics_panel_number_t %>% select("PANEL", "BASEID") 
+
+panel_number_data<- subset(demographics_panel_number, PANEL %in% c(panel_number_survey) )
+}
+```
+
+```{r, message=FALSE, warning=FALSE}
+#iterate through the survey baseline directories, and read in and create the dataframe of just baseids and panel numbers using the above function
+
+all_panel_number_data <- list()
+
+year_survey <- 2016
+panel_number_survey <- 2015
+
+for (panel in survey_directories_BL) {
+  setwd(panel)
+  panel_number_data <- analyze_survey_panel_number(year_survey)
+  
+  # Append the panel data to the list
+  all_panel_number_data[[panel_number_survey]] <- panel_number_data
+  
+  year_survey <- year_survey + 1
+  panel_number_survey <- panel_number_survey + 1
+}
+```
+
+```{r}
+#bind each year's panel number data frame together into a single dataframe encompassing all years of interest
+PANEL_NUMBER<-bind_rows(all_panel_number_data[2015], all_panel_number_data[2016], all_panel_number_data[2017], all_panel_number_data[2018],all_panel_number_data[2019])
+```
+
+## attach panel numbers to our two year weights
+```{r}
+#The goal of this section is to attach panel numbers to our two year weights 
+
+analyze_two_year_panel_weights<- function(panel){
+  twoyearweights<-as.data.frame(read_sas('csl2wgts.sas7bdat')) 
+  
+  two_year_weights_with_panel_number<-left_join(twoyearweights, PANEL_NUMBER, by= "BASEID")
+    
+  two_year_weights_with_panel_number<- filter(two_year_weights_with_panel_number , PANEL %in% panel_number_weights )
+  
+}
+```
+
+```{r}
+cost_directories_BL <- c(
+  "H:/MCBS/Cost Supplement 2017/Data/SAS Files",
+  "H:/MCBS/Cost Supplement 2018/Data/SAS Files",
+  "H:/MCBS/Cost Supplement 2019/Data/SAS Files",
+  "H:/MCBS/Cost Supplement 2020/Data/SAS Files",
+  "H:/MCBS/Cost Supplement 2021/Data/SAS Files"
+)
+```
+```{r}
+#Use the above function to create a list of panel numbers and two year weights
+two_year_weights <- list()
+
+year_weights <- 2017
+panel_number_weights <- 2015
+
+for (panel in cost_directories_BL) {
+  setwd(panel)
+  two_year_panel_weights <- analyze_two_year_panel_weights(year_weights)
+  
+  # Append the panel data to the list
+  two_year_weights[[panel_number_weights]] <- two_year_panel_weights
+  
+  year_weights <- year_weights + 1
+  panel_number_weights <- panel_number_weights + 1
+}
+```
+```{r}
+#remove those with
+length(unique(total_DM_population_preweight$BASEID))
+total_DM_population_preweight<- total_DM_population_preweight %>% filter(ESRD=="No ESRD")
+length(unique(total_DM_population_preweight$BASEID))
+```
+```{r}
+#bind all years of two year weights and panel numbers into a single dataframe 
+two_year_weights_totalpop<-bind_rows(two_year_weights[2015], two_year_weights[2016], two_year_weights[2017], two_year_weights[2018],two_year_weights[2019])
+```
+
+```{r}
+length(unique(total_DM_population_preweight$BASEID))
+#Join DM population with 2 year weights
+DM_population_with_2yr_weights<-inner_join(total_DM_population_preweight,two_year_weights_totalpop, #join the DM population including our drug users with weights
+                                by="BASEID",
+                               suffix= c("", ".w"),
+                               copy=FALSE)
+
+length(unique(DM_population_with_2yr_weights$BASEID))
+```
+```{r}
+table(DM_population_with_2yr_weights$max_flag_non_missing_service)
+DM_population_with_2yr_weights <-DM_population_with_2yr_weights %>% filter(max_flag_non_missing_service!= "1")
+length(unique(DM_population_with_2yr_weights$BASEID))
+```
+
+```{r}
+no_service_date_DM_population_with_2yr_weights<- DM_population_with_2yr_weights %>% filter(missing_service_date == 1)
+nrow(no_service_date_DM_population_with_2yr_weights)
+
+service_date_DM_population_with_2yr_weights<- DM_population_with_2yr_weights %>% filter(missing_service_date == 0)
+```
+```{r}
+#create a dataset of Beneficiaries with diabetes that have no target drug class fills 
+nrow(service_date_DM_population_with_2yr_weights)
+#just remove them one at a time since some have both 
+removed_beneficiaries <- service_date_DM_population_with_2yr_weights %>%
+  filter(has_GLP1RA_factor == 1 | has_SGLT2i_factor == 1 | BothDrugs_BL == 1 & has_GLP1RA.b==1 & has_SGLT2i.b==1) %>%
+  select(BASEID)
+
+total_DM_pop_no_TD_with_2yr_weights <- service_date_DM_population_with_2yr_weights %>%
+  filter(has_GLP1RA_factor != 1 & has_SGLT2i_factor !=1 & BothDrugs_BL !=1 & has_GLP1RA.b!=1 & has_SGLT2i.b!=1)
+nrow(total_DM_pop_no_TD_with_2yr_weights)
+```
+```{r}
+nrow(DM_population_with_2yr_weights)
+
+weighted_DM_population_two_year_weights_pre<-
+    svrepdesign( 
+    weights = ~CSL2YWGT, 
+    repweights = "CSL2Y[001-100]+" , 
+    type = "BRR", 
+    data = DM_population_with_2yr_weights ,
+    combined.weights = TRUE
+)
+
+svytotal(~dummy, design= weighted_DM_population_two_year_weights_pre, na.rm= TRUE)
+```
+# create a dataset of Beneficiaries with diabetes that have no target drug class fills 
+```{r}
+#create a dataset of Beneficiaries with diabetes that have no target drug class fills 
+nrow(DM_population_with_2yr_weights)
+#just remove them one at a time since some have both 
+total_DM_pop_no_TD_with_2yr_weights <- DM_population_with_2yr_weights %>%
+  filter(has_GLP1RA.b != 1)
+
+nrow(total_DM_pop_no_TD_with_2yr_weights)
+total_DM_pop_no_TD_with_2yr_weights <- total_DM_pop_no_TD_with_2yr_weights %>%
+  filter(has_SGLT2i.b != 1)
+
+nrow(total_DM_pop_no_TD_with_2yr_weights)
+```
+## create variables for the OOP of the no TDC diabetes 
+```{r}
+#Healthcare Resource utilization / total cost excluding OOP for BL
+#Here I join in the service summary file to utilize the Total OOP PME
+
+analyze_service_summary_panel<- function(panel){
+service_summary<-as.data.frame(read_sas('ss.sas7bdat'))
+service_summary_PME<-service_summary %>% filter(EVNTTYPE  == "PM") 
+}
+```
+
+```{r}
+#add or subtract years based on the length of your analysis
+cost_directories_BL <- c(
+  "H:/MCBS/Cost Supplement 2016/Data/SAS Files",
+  "H:/MCBS/Cost Supplement 2017/Data/SAS Files",
+  "H:/MCBS/Cost Supplement 2018/Data/SAS Files",
+  "H:/MCBS/Cost Supplement 2019/Data/SAS Files",
+  "H:/MCBS/Cost Supplement 2020/Data/SAS Files",
+  "H:/MCBS/Cost Supplement 2021/Data/SAS Files"
+)
+```
+```{r}
+#iterate through baseline cost directories and run function above that extracts the total PME OOP for each individual
+service_summary_BL <- list()
+
+year_cost <- 2016
+panel_number_cost <- 2015
+
+for (panel in cost_directories_BL) {
+  setwd(panel)
+  service_summary_BL_analysis <- analyze_service_summary_panel(year_cost)
+  
+  # Append the panel data to the list
+  service_summary_BL[[panel_number_cost]] <- service_summary_BL_analysis
+  
+  year_cost <- year_cost + 1
+  panel_number_cost <- panel_number_cost + 1
+}
+```
+
+```{r}
+#Bind all years of service summary 
+service_summary<-bind_rows(service_summary_BL[2015], service_summary_BL[2016], service_summary_BL[2017], service_summary_BL[2018],service_summary_BL[2019])
+```
+
+```{r}
+#create variables for the OOP of the no TDC diabetes 
+total_DM_pop_no_TD_with_2yr_weights <- total_DM_pop_no_TD_with_2yr_weights %>%
+  left_join(service_summary,  suffix= c("", ".ss")) %>%
+  group_by(BASEID) %>%
+  mutate(Total.OOP.ex.PME = (PAMTOOP.b  - AAMTOOP))
+nrow(total_DM_pop_no_TD_with_2yr_weights)
+```
+```{r}
+#TOTAL non-hypoglycemic PME OOP
+total_DM_pop_no_TD_with_2yr_weights <- total_DM_pop_no_TD_with_2yr_weights %>%
+
+  group_by(BASEID) %>%
+  mutate(Total.Non.Hypo.OOP = (AAMTOOP - Total_Hypoglycemics_OOP))
+
+nrow(total_DM_pop_no_TD_with_2yr_weights)
+
+#other hypoglycemic PME OOP 
+
+total_DM_pop_no_TD_with_2yr_weights <- total_DM_pop_no_TD_with_2yr_weights %>%
+  group_by(BASEID) %>%
+  mutate(Total.Non.TD.hypo.OOP = (Total_Hypoglycemics_OOP ))
+nrow(total_DM_pop_no_TD_with_2yr_weights)
+```
+```{r}
+#left join our BL and OC for our GLP1RA population. Fill NA OC supply with 0 for GLP1RA. We want to preserve all individuals who have GLP1RA fills at baseline even if they have no GLP1RA fills in the outcome.  
+
+total_GLP1RA_population_preweight<-left_join(GLP1RA_BL, GLP1RA_OC, by= "BASEID", suffix= c(".b", ".o"),copy=FALSE)
+
+total_GLP1RA_population_preweight<-left_join(total_GLP1RA_population_preweight, PANEL_NUMBER_and_date_of_death, by="BASEID", copy=FALSE) %>% 
+  mutate(Final_GLP1RA_Supply_OC = ifelse(is.na(Final_GLP1RA_Supply_OC), 0, Final_GLP1RA_Supply_OC), 
+         GLP1RA.o= ifelse(is.na(GLP1RA.o), 0, GLP1RA.o))  
+
+head(total_GLP1RA_population_preweight$max_GLP1RA_OC_days_denom , 1000)
+```
+```{r}
+#Fill the PDC denominator (days in period) while accounting for death
+total_GLP1RA_population_preweight<- total_GLP1RA_population_preweight %>% mutate(
+ first_OC_year_GLP1RA = as.numeric(PANEL, "%Y", na.rm= TRUE) +2 ,
+last_OC_year_GLP1RA= first_OC_year_GLP1RA,
+ 
+start_date_GLP1RA_OC = as.Date(paste(first_OC_year_GLP1RA, "-01-01", sep = ""), format = "%Y-%m-%d"), #creating a variable for December 31st of the OC year 
+          end_date_GLP1RA_OC= as.Date(paste(last_OC_year_GLP1RA, "-12-31", sep = ""), format = "%Y-%m-%d"),
+     
+     death_year_GLP1RA_OC= ifelse(is.na(H_DOD), 0, as.numeric(format(H_DOD, "%Y"))),
+     #will need to include other censoring variables
+     
+     GLP1RA_OC_days_denominator_no_OC_fills= ifelse(death_year_GLP1RA_OC==first_OC_year_GLP1RA | death_year_GLP1RA_OC==last_OC_year_GLP1RA, as.integer(difftime(H_DOD , start_date_GLP1RA_OC, units="days"))+1,as.integer(difftime(end_date_GLP1RA_OC, start_date_GLP1RA_OC, units="days"))+1), #finding the maximum theoretical supply at OC
+
+       max_GLP1RA_OC_days_denominator= ifelse(is.na(max_GLP1RA_OC_days_denom ), GLP1RA_OC_days_denominator_no_OC_fills,  max_GLP1RA_OC_days_denom ))
+
+
+head(total_GLP1RA_population_preweight$max_GLP1RA_OC_days_denominator, 100)
+```
+```{r}
+#left join our BL and OC for our SGLT2i population. Fill NA OC supply with 0 for SGLT2i. We want to preserve all individuals who have SGLT2i fills at baseline even if they have no SGLT2i fills in the outcome.
+
+total_SGLT2i_population_preweight<-left_join(SGLT2i_BL, SGLT2i_OC, by= "BASEID", suffix= c(".b", ".o"),copy=FALSE)
+
+total_SGLT2i_population_preweight<-left_join(total_SGLT2i_population_preweight, PANEL_NUMBER_and_date_of_death, by="BASEID", copy=FALSE) %>% 
+  mutate(Final_SGLT2i_Supply_OC = ifelse(is.na(Final_SGLT2i_Supply_OC), 0, Final_SGLT2i_Supply_OC), 
+         SGLT2i.o= ifelse(is.na(SGLT2i.o), 0, SGLT2i.o))  
+
+head(total_SGLT2i_population_preweight$max_SGLT2i_OC_days_denom, 100)
+```
+
+```{r}
+#Fill the PDC denominator (days in period) while accounting for death
+total_SGLT2i_population_preweight<- total_SGLT2i_population_preweight %>% mutate(
+ first_OC_year_SGLT2i = as.numeric(PANEL, "%Y", na.rm= TRUE) +2 ,
+last_OC_year_SGLT2i= first_OC_year_SGLT2i,
+ 
+start_date_SGLT2i_OC = as.Date(paste(first_OC_year_SGLT2i, "-01-01", sep = ""), format = "%Y-%m-%d"), #creating a variable for December 31st of the OC year 
+          end_date_SGLT2i_OC= as.Date(paste(last_OC_year_SGLT2i, "-12-31", sep = ""), format = "%Y-%m-%d"),
+     
+     death_year_SGLT2i_OC= ifelse(is.na(H_DOD), 0, as.numeric(format(H_DOD, "%Y"))),
+     #will need to include other censoring variables
+     
+     SGLT2i_OC_days_denominator_no_OC_fills= ifelse(death_year_SGLT2i_OC==first_OC_year_SGLT2i | death_year_SGLT2i_OC==last_OC_year_SGLT2i, as.integer(difftime(H_DOD , start_date_SGLT2i_OC, units="days"))+1,as.integer(difftime(end_date_SGLT2i_OC, start_date_SGLT2i_OC, units="days"))+1), #finding the maximum theoretical supply at OC
+
+       max_SGLT2i_OC_days_denominator= ifelse(is.na(max_SGLT2i_OC_days_denom), SGLT2i_OC_days_denominator_no_OC_fills, max_SGLT2i_OC_days_denom))
+
+
+head(total_SGLT2i_population_preweight$max_SGLT2i_OC_days_denominator, 100)
+```
+#Join populations with weights
+```{r}
+#Join total BL population with 2 year weights
+total_population_with_2yr_weights<-inner_join(BL_survey_totalpop,two_year_weights_totalpop, #join the DM population including the drug users with weights
+                                by="BASEID",
+                                suffix= c("", ".w"),
+                               copy=FALSE)
+
+#create a population dummy to count the total weighted population later 
+total_population_with_2yr_weights$population<- 1 
+```
+
+```{r}
+combined_baseids <- c(total_GLP1RA_population_preweight$BASEID, total_SGLT2i_population_preweight$BASEID)
+length(unique(combined_baseids))
+
+#Join GLP1RA population (where the PDC numerator <= PDC denominator) with 2 year weights
+
+GLP1RA_users_with_2yr_weights<- inner_join(total_GLP1RA_population_preweight,two_year_weights_totalpop, #join the DM population including our drug users with weights
+                                by="BASEID",
+                                suffix= c("", ".w"),
+                                copy=FALSE)
+
+#Join SGLT2i population (where the PDC numerator <= PDC denominator) with 2 year weights
+
+SGLT2i_users_with_2yr_weights<- inner_join(total_SGLT2i_population_preweight,two_year_weights_totalpop, #join the DM population including our drug users with weights
+                                by="BASEID",
+                                suffix= c("", ".w"),
+                                copy=FALSE)
+
+combined_baseids <- c(GLP1RA_users_with_2yr_weights$BASEID, SGLT2i_users_with_2yr_weights$BASEID)
+length(unique(combined_baseids))
+```
+## Replace 0 with NA in the continuous income (INCOME_H)  column
+```{r}
+#Would here be a good place to filter by just the columns we want for our analysis
+
+# Replace 0 with NA in the continuous income (INCOME_H)  column
+
+SGLT2i_users_with_2yr_weights$INCOME_H <- ifelse(SGLT2i_users_with_2yr_weights$INCOME_H == 0, NA, SGLT2i_users_with_2yr_weights$INCOME_H)
+
+
+GLP1RA_users_with_2yr_weights$INCOME_H <- ifelse(GLP1RA_users_with_2yr_weights$INCOME_H == 0, NA, GLP1RA_users_with_2yr_weights$INCOME_H)
+```
+
+```{r}
+#create OOP/supply ratio variables
+GLP1RA_users_with_2yr_weights$GLP1RA_OOP_supply_ratio<- GLP1RA_users_with_2yr_weights$Total_GLP1RA_OOP_BL / GLP1RA_users_with_2yr_weights$Final_GLP1RA_Supply_BL *30
+
+SGLT2i_users_with_2yr_weights$SGLT2i_OOP_supply_ratio<- SGLT2i_users_with_2yr_weights$Total_SGLT2i_OOP_BL / SGLT2i_users_with_2yr_weights$Final_SGLT2i_Supply_BL *30
+
+GLP1RA_users_with_2yr_weights$GLP1RA_OOP_covered_ratio<- GLP1RA_users_with_2yr_weights$Total_GLP1RA_OOP_BL / GLP1RA_users_with_2yr_weights$GLP1RA_PDC_num_BL *30
+
+SGLT2i_users_with_2yr_weights$SGLT2i_OOP_covered_ratio<- SGLT2i_users_with_2yr_weights$Total_SGLT2i_OOP_BL / SGLT2i_users_with_2yr_weights$SGLT2i_PDC_num_BL *30
+
+combined_baseids <- c(GLP1RA_users_with_2yr_weights$BASEID, SGLT2i_users_with_2yr_weights$BASEID)
+length(unique(combined_baseids))
+```
+```{r}
+#fill Oc supply for those with missing with 0 
+ mean(is.na(GLP1RA_users_with_2yr_weights$GLP1RA_PDC_num_OC))
+GLP1RA_users_with_2yr_weights$GLP1RA_PDC_num_OC[is.na(GLP1RA_users_with_2yr_weights$GLP1RA_PDC_num_OC)] <- 0 
+
+ mean(is.na(GLP1RA_users_with_2yr_weights$GLP1RA_PDC_num_OC))
+ 
+ mean(is.na(SGLT2i_users_with_2yr_weights$SGLT2i_PDC_num_OC))
+ 
+SGLT2i_users_with_2yr_weights$SGLT2i_PDC_num_OC[is.na(SGLT2i_users_with_2yr_weights$SGLT2i_PDC_num_OC)] <- 0 
+ 
+mean(is.na(SGLT2i_users_with_2yr_weights$SGLT2i_PDC_num_OC))
+```
+```{r}
+#remove values of 50 for drinking
+nrow(GLP1RA_users_with_2yr_weights)
+GLP1RA_users_with_2yr_weights<-subset(GLP1RA_users_with_2yr_weights, Drinking !=50| is.na(Drinking))
+nrow(GLP1RA_users_with_2yr_weights)
+
+nrow(SGLT2i_users_with_2yr_weights)
+SGLT2i_users_with_2yr_weights<-subset(SGLT2i_users_with_2yr_weights, Drinking !=50| is.na(Drinking))
+nrow(SGLT2i_users_with_2yr_weights)
+
+total_DM_pop_no_TD_with_2yr_weights <- total_DM_pop_no_TD_with_2yr_weights %>%
+  mutate(Drinking = ifelse(Drinking == 50, NA, Drinking))
+
+combined_baseids <- c(GLP1RA_users_with_2yr_weights$BASEID, SGLT2i_users_with_2yr_weights$BASEID)
+length(unique(combined_baseids))
+```
+## filter those with ERSA out of our drug user population
+```{r}
+#filter those with ERSA out of our drug user population
+GLP1RA_users_with_2yr_weights<- GLP1RA_users_with_2yr_weights %>% filter(ESRD=="No ESRD")
+SGLT2i_users_with_2yr_weights<- SGLT2i_users_with_2yr_weights %>% filter(ESRD=="No ESRD")
+total_DM_pop_no_TD_with_2yr_weights<- total_DM_pop_no_TD_with_2yr_weights %>% filter(ESRD=="No ESRD")
+DM_population_with_2yr_weights<- DM_population_with_2yr_weights %>% filter(ESRD=="No ESRD")
+
+length(unique(GLP1RA_users_with_2yr_weights$BASEID))
+length(unique(SGLT2i_users_with_2yr_weights$BASEID))
+length(unique(total_DM_pop_no_TD_with_2yr_weights$BASEID))
+
+combined_baseids <- c(GLP1RA_users_with_2yr_weights$BASEID, SGLT2i_users_with_2yr_weights$BASEID)
+length(unique(combined_baseids))
+```
+## create binary IPR
+```{r}
+total_DM_pop_no_TD_with_2yr_weights$IPR_final_binary <- ifelse(as.numeric(as.character(total_DM_pop_no_TD_with_2yr_weights$IPR_final_cat)) <= 4, 1, 0)
+DM_population_with_2yr_weights$IPR_final_binary <- ifelse(as.numeric(as.character(DM_population_with_2yr_weights$IPR_final_cat)) <= 4, 1, 0)
+
+GLP1RA_users_with_2yr_weights$IPR_final_binary <- ifelse(as.numeric(as.character(GLP1RA_users_with_2yr_weights$IPR_final_cat)) <= 4, 1, 0)
+SGLT2i_users_with_2yr_weights$IPR_final_binary <- ifelse(as.numeric(as.character(SGLT2i_users_with_2yr_weights$IPR_final_cat)) <= 4, 1, 0)
+```
+
+```{r}
+total_DM_pop_no_TD_with_2yr_weights_low_income <- total_DM_pop_no_TD_with_2yr_weights %>%
+  filter(IPR_final_binary == 1 )
+
+total_DM_pop_no_TD_with_2yr_weights_high_income <- total_DM_pop_no_TD_with_2yr_weights %>%
+  filter(IPR_final_binary == 0 )
+
+GLP1RA_users_with_2yr_weights_low_income <- GLP1RA_users_with_2yr_weights %>%
+  filter(IPR_final_binary == 1 )
+
+GLP1RA_users_with_2yr_weights_high_income <- GLP1RA_users_with_2yr_weights %>%
+  filter(IPR_final_binary == 0 )
+
+SGLT2i_users_with_2yr_weights_low_income <- SGLT2i_users_with_2yr_weights %>%
+  filter(IPR_final_binary == 1 )
+
+SGLT2i_users_with_2yr_weights_high_income <- SGLT2i_users_with_2yr_weights %>%
+  filter(IPR_final_binary == 0 )
+```
+
+```{r}
+combined_data <- rbind(GLP1RA_users_with_2yr_weights, SGLT2i_users_with_2yr_weights)
+
+# Keep only the first instance of each BASEID
+unique_combined_data <- combined_data[!duplicated(combined_data$BASEID), ]
+
+# Get the length of unique BASEIDs
+length_unique_BASEID <- length(unique(unique_combined_data$BASEID))
+
+# Print the result
+print(length_unique_BASEID)
+
+weighted_combbined_TD_population_two_year_weights<-
+    svrepdesign( 
+    weights = ~CSL2YWGT, 
+    repweights = "CSL2Y[001-100]+" , 
+    type = "BRR", 
+    data = unique_combined_data ,
+    combined.weights = TRUE
+)
+svytotal(~dummy, design= weighted_combbined_TD_population_two_year_weights, na.rm= TRUE)
+```
+
+```{r}
+your_population<- GLP1RA_users_with_2yr_weights
+length(unique(your_population$BASEID))
+
+combined_baseids <- c(GLP1RA_users_with_2yr_weights$BASEID, SGLT2i_users_with_2yr_weights$BASEID)
+length(unique(combined_baseids))
+```
+# Create our weighted survey objects
+```{r}
+#create a weighted survey object for our DM population
+weighted_DM_population_two_year_weights<-
+    svrepdesign( 
+    weights = ~CSL2YWGT, 
+    repweights = "CSL2Y[001-100]+" , 
+    type = "BRR", 
+    data = DM_population_with_2yr_weights ,
+    combined.weights = TRUE
+)
+
+#create a weighted survey object for our DM population excluding users of target drugs.. 
+weighted_DM_no_TD_population_two_year_weights<-
+    svrepdesign( 
+    weights = ~CSL2YWGT, 
+    repweights = "CSL2Y[001-100]+" , 
+    type = "BRR", 
+    data = total_DM_pop_no_TD_with_2yr_weights ,
+    combined.weights = TRUE
+)
+
+#create a weighted survey object for our total population
+weighted_total_population_two_year_weights<-
+  svrepdesign( 
+    weights = ~CSL2YWGT, 
+    repweights = "CSL2Y[001-100]+" , 
+    type = "BRR", 
+    data = total_population_with_2yr_weights ,
+    combined.weights = TRUE
+)
+
+#weighted survey objects for target drugs
+#create a weighted survey object for our GLP1RA population (where the PDC numerator <= PDC denominator)
+weighted_GLP1RA_population_two_year_weights <-
+    svrepdesign( 
+    weights = ~CSL2YWGT, 
+    repweights = "CSL2Y[001-100]+" , 
+    type = "BRR", 
+    data = GLP1RA_users_with_2yr_weights ,
+    combined.weights = TRUE
+)
+
+#create a weighted survey object for our SGLT2i population (where the PDC numerator <= PDC denominator)
+weighted_SGLT2i_population_two_year_weights <-
+    svrepdesign( 
+    weights = ~CSL2YWGT, 
+    repweights = "CSL2Y[001-100]+" , 
+    type = "BRR", 
+    data = SGLT2i_users_with_2yr_weights ,
+    combined.weights = TRUE
+)
+```
+
+## high and low income
+```{r}
+weighted_DM_no_TD_population_two_year_weights_low_income <-
+    svrepdesign( 
+    weights = ~CSL2YWGT, 
+    repweights = "CSL2Y[001-100]+" , 
+    type = "BRR", 
+    data = total_DM_pop_no_TD_with_2yr_weights_low_income,
+    combined.weights = TRUE)
+
+weighted_DM_no_TD_population_two_year_weights_high_income <-
+    svrepdesign( 
+    weights = ~CSL2YWGT, 
+    repweights = "CSL2Y[001-100]+" , 
+    type = "BRR", 
+    data = total_DM_pop_no_TD_with_2yr_weights_high_income,
+    combined.weights = TRUE)
+
+weighted_GLP1RA_population_two_year_weights_low_income <-
+    svrepdesign( 
+    weights = ~CSL2YWGT, 
+    repweights = "CSL2Y[001-100]+" , 
+    type = "BRR", 
+    data = GLP1RA_users_with_2yr_weights_low_income,
+    combined.weights = TRUE)
+
+weighted_GLP1RA_population_two_year_weights_high_income <-
+    svrepdesign( 
+    weights = ~CSL2YWGT, 
+    repweights = "CSL2Y[001-100]+" , 
+    type = "BRR", 
+    data = GLP1RA_users_with_2yr_weights_high_income,
+    combined.weights = TRUE)
+
+weighted_SGLT2i_population_two_year_weights_low_income <-
+    svrepdesign( 
+    weights = ~CSL2YWGT, 
+    repweights = "CSL2Y[001-100]+" , 
+    type = "BRR", 
+    data = SGLT2i_users_with_2yr_weights_low_income,
+    combined.weights = TRUE)
+
+weighted_SGLT2i_population_two_year_weights_high_income <-
+    svrepdesign( 
+    weights = ~CSL2YWGT, 
+    repweights = "CSL2Y[001-100]+" , 
+    type = "BRR", 
+    data = SGLT2i_users_with_2yr_weights_high_income,
+    combined.weights = TRUE)
+```
+
+#Medicaid histograms
+```{r}
+#these are needed for the histogram
+GLP1RA_users_with_2yr_weights_medicaid <- GLP1RA_users_with_2yr_weights_low_income %>%
+  filter(Medicaid == "Some medicaid participation")
+
+weighted_GLP1RA_population_two_year_weights_medicaid <-
+    svrepdesign( 
+    weights = ~CSL2YWGT, 
+    repweights = "CSL2Y[001-100]+" , 
+    type = "BRR", 
+    data = GLP1RA_users_with_2yr_weights_medicaid,
+    combined.weights = TRUE
+)  
+GLP1RA_users_with_2yr_weights_no_medicaid <- GLP1RA_users_with_2yr_weights_low_income %>%
+  filter(Medicaid == "No medicaid participation")
+
+weighted_GLP1RA_population_two_year_weights_no_medicaid <-
+    svrepdesign( 
+    weights = ~CSL2YWGT, 
+    repweights = "CSL2Y[001-100]+" , 
+    type = "BRR", 
+    data = GLP1RA_users_with_2yr_weights_no_medicaid ,
+    combined.weights = TRUE
+)
+```
+
+```{r}
+#these are neede for the histogram
+SGLT2i_users_with_2yr_weights_medicaid <- SGLT2i_users_with_2yr_weights_low_income %>%
+  filter(Medicaid == "Some medicaid participation")
+
+weighted_SGLT2i_population_two_year_weights_medicaid <-
+    svrepdesign( 
+    weights = ~CSL2YWGT, 
+    repweights = "CSL2Y[001-100]+" , 
+    type = "BRR", 
+    data = SGLT2i_users_with_2yr_weights_medicaid,
+    combined.weights = TRUE
+)  
+SGLT2i_users_with_2yr_weights_no_medicaid <- SGLT2i_users_with_2yr_weights_low_income %>%
+  filter(Medicaid == "No medicaid participation")
+
+weighted_SGLT2i_population_two_year_weights_no_medicaid <-
+    svrepdesign( 
+    weights = ~CSL2YWGT, 
+    repweights = "CSL2Y[001-100]+" , 
+    type = "BRR", 
+    data = SGLT2i_users_with_2yr_weights_no_medicaid ,
+    combined.weights = TRUE
+)
+```
+
+```{r}
+names(GLP1RA_users_with_2yr_weights_medicaid)[names(GLP1RA_users_with_2yr_weights_medicaid) == "Total_GLP1RA_OOP_BL"] <- "OOP"
+
+# Rename the OOP column in SGLT2i_users_with_2yr_weights_medicaid
+names(SGLT2i_users_with_2yr_weights_medicaid)[names(SGLT2i_users_with_2yr_weights_medicaid) == "Total_SGLT2i_OOP_BL"] <- "OOP"
+
+TD_Medicaid<-bind_rows(GLP1RA_users_with_2yr_weights_medicaid, SGLT2i_users_with_2yr_weights_medicaid)
+
+TD_Medicaid_final <- TD_Medicaid %>%
+  group_by(BASEID) %>%
+  mutate(OOP = sum(OOP, na.rm = TRUE))
+
+names(GLP1RA_users_with_2yr_weights_no_medicaid)[names(GLP1RA_users_with_2yr_weights_no_medicaid) == "Total_GLP1RA_OOP_BL"] <- "OOP"
+
+# Rename the OOP column in SGLT2i_users_with_2yr_weights_no_medicaid
+names(SGLT2i_users_with_2yr_weights_no_medicaid)[names(SGLT2i_users_with_2yr_weights_no_medicaid) == "Total_SGLT2i_OOP_BL"] <- "OOP"
+
+TD_no_Medicaid<-bind_rows(GLP1RA_users_with_2yr_weights_no_medicaid, SGLT2i_users_with_2yr_weights_no_medicaid)
+
+TD_no_Medicaid_final <- TD_no_Medicaid %>%
+  group_by(BASEID) %>%
+  mutate(OOP = sum(OOP, na.rm = TRUE))
+
+weighted_medicaid <-
+    svrepdesign( 
+    weights = ~CSL2YWGT, 
+    repweights = "CSL2Y[001-100]+" , 
+    type = "BRR", 
+    data = TD_Medicaid_final,
+    combined.weights = TRUE
+)  
+SGLT2i_users_with_2yr_weights_no_medicaid <- SGLT2i_users_with_2yr_weights_low_income %>%
+  filter(Medicaid == "No medicaid participation")
+
+weighted_no_medicaid <-
+    svrepdesign( 
+    weights = ~CSL2YWGT, 
+    repweights = "CSL2Y[001-100]+" , 
+    type = "BRR", 
+    data = TD_no_Medicaid_final ,
+    combined.weights = TRUE
+)
+```
+
+```{r}
+Medicaid_hist <- svyhist(~OOP, design=weighted_medicaid, main="A", xlim=c(0, 6000), breaks= 100, freq=TRUE, col="#5A167EFF")
+
+# Overlay histogram for GLP1RA_no_Medicaid on GLP1RA_Medicaid
+No_Medicaid_hist<- svyhist(~OOP, design=weighted_no_medicaid, main ="B",  xlim=c(0, 6000), col="#FEBA80FF",breaks= 100,  freq = TRUE)
+```
+
+```{r}
+setwd("H:/MCBS_figures")
+# Save the plot to a PDF file
+pdf("combined_medicaid_histograms_final.pdf", width = 13, height = 13)
+par(mfrow = c(2, 1),  mai = c(0.5, 1.2, 0.8, 0.2) , mgp = c(4, 1, 0) )  # Resetting the layout for saving to PDF
+plot(Medicaid_hist, ylab= "# of Medicare Beneficiaries", xlab = "", main ="A", cex.lab = 2.4 ,cex.main = 2.4, cex.axis = 2.4,  col="#5A167EFF", xlim=c(0, 5000), ylim=c(0, 300000) )
+par( mai = c(1.2, 1.5, 0.5, 0.2), mgp = c(4, 1, 0))
+plot(No_Medicaid_hist, ylab= "# of Medicare Beneficiaries", xlab= "Out-of-pocket cost ($)", main ="B", cex.lab = 2.4 ,cex.main = 2.4, cex.axis = 2.4,  col="#FEBA80FF", xlim=c(0, 5000),  ylim=c(0, 300000) )
+```
+```{r}
+GLP1RA_Medicaid <- svyhist(~Total_GLP1RA_OOP_BL, design=weighted_GLP1RA_population_two_year_weights_medicaid, main="A", xlim=c(0, 5000), breaks= 100, freq=TRUE, col="#5A167EFF")
+
+# Overlay histogram for GLP1RA_no_Medicaid on GLP1RA_Medicaid
+GLP1RA_no_Medicaid<- svyhist(~Total_GLP1RA_OOP_BL, design=weighted_GLP1RA_population_two_year_weights_no_medicaid, main ="C",  xlim=c(0, 5000), col="#FEBA80FF",breaks= 100,  freq = TRUE)
+
+SGLT2i_Medicaid<-svyhist(~Total_SGLT2i_OOP_BL, design=weighted_SGLT2i_population_two_year_weights_medicaid, main = "B", breaks= 100, xlim=c(0, 6000), col="#5A167EFF" , freq = TRUE)
+
+SGLT2i_no_Medicaid<-svyhist(~Total_SGLT2i_OOP_BL, design=weighted_SGLT2i_population_two_year_weights_no_medicaid, main = "D", breaks= 100, xlim=c(0, 6000),col="#FEBA80FF",  freq = TRUE)
+```
+
+```{r}
+setwd("H:/MCBS_figures")
+# Save the plot to a PDF file
+pdf("combined_medicaid_histograms.pdf", width = 20, height = 10)
+par(mfrow = c(2, 2))  # Resetting the layout for saving to PDF
+plot(GLP1RA_Medicaid, ylab= "# of Medicare Beneficiaries" ,xlab= "GLP1RA out-of-pocket cost ($)", main ="A", cex.lab = 1.5 ,cex.main = 2, col="#5A167EFF", xlim=c(0, 5000), ylim=c(0, 300000) )
+plot(SGLT2i_Medicaid, ylab= "# of Medicare Beneficiaries" ,xlab= "SGLT2i out-of-pocket cost ($)", main ="B",cex.lab = 1.5 ,cex.main = 2, col="#5A167EFF", xlim=c(0, 3500),  ylim=c(0, 200000)  )
+plot(GLP1RA_no_Medicaid, ylab= "# of Medicare Beneficiaries", xlab= "GLP1RA out-of-pocket cost ($)", main ="C", cex.lab = 1.5 ,cex.main = 2, col="#FEBA80FF", xlim=c(0, 5000),  ylim=c(0, 300000) )
+plot(SGLT2i_no_Medicaid, ylab= "# of Medicare Beneficiaries", xlab= "SGLT2i out-of-pocket cost ($)", main ="D",cex.lab = 1.5 ,cex.main = 2, col="#FEBA80FF", xlim=c(0, 3500),  ylim=c(0, 200000))
+
+```
+#count weighted populations 
+```{r}
+your_survey_design <- weighted_total_population_two_year_weights
+svytotal(~dummy, design= your_survey_design, na.rm= TRUE)
+```
+# summary statistics_total_and_diabetes 
+```{r}
+# ADJUST Replace 'weighted_DM_no_TD_population_two_year_weights' with your actual survey design object
+your_survey_design <- weighted_DM_no_TD_population_two_year_weights
+your_survey_design_name <- "Diabetes" 
+
+# Function to calculate survey means for continuous predictors
+calculate_survey_means <- function(survey_design) {
+  survey_means <- svymean(~INCOME_H + Age + Charlson_QUAN + ADL + Risk_CVD_event + DM_duration_years+Drinking+ BMI+ Total.OOP.ex.PME +Total.Non.Hypo.OOP  +Total.Non.TD.hypo.OOP + Glycemic_control_numeric, design = survey_design, na.rm = TRUE)
+
+  # Extract mean values from survey object
+  means <- coef(survey_means)
+
+  # Create a dataframe for the means with variable names
+  means_dataframe <- data.frame(Variable = names(means), Mean = means)
+
+  return(means_dataframe)
+}
+
+# Function to calculate survey quartiles for all continuous predictors
+calculate_survey_quartiles_all <- function(survey_design, formula) {
+  # Extract variable names from the formula
+  variable_names <- all.vars(formula)
+
+  # Initialize an empty list to store results for each variable
+  results_list <- list()
+
+  # Loop through each variable and calculate quartiles
+  for (variable in variable_names) {
+    survey_quartiles <- svyquantile(as.formula(paste0("~", variable)), design = survey_design, c(0, 0.25, 0.5, 0.75, 1), na.rm = TRUE)
+
+    # Extract quartile values from survey object
+    quartiles <- as.data.frame(t(coef(survey_quartiles)))
+
+    # Create a dataframe for the quartiles with variable names
+    quartiles_dataframe <- data.frame(
+      Variable = variable,
+      Q0 = quartiles[, 1],
+      Q25 = quartiles[, 2],
+      Q50 = quartiles[, 3],
+      Q75 = quartiles[, 4],
+      Q100 = quartiles[, 5]
+    )
+
+    # Add the results to the list
+    results_list[[variable]] <- quartiles_dataframe
+  }
+
+  # Combine results into a single dataframe
+  result_dataframe <- do.call(rbind, results_list)
+
+  return(result_dataframe)
+}
+
+# Function to calculate proportions and counts for a given variable
+calculate_proportions <- function(variable_name, survey_design) {
+  # Create a summary table for proportions and counts of each level of the variable
+  proportions_summary <- svytotal(as.formula(paste("~factor(", variable_name, ")")), design = survey_design, na.rm=TRUE)
+  
+  # Get factor levels and their labels using the survey design
+  factor_levels <- levels(survey_design$variables[[variable_name]])
+  
+  # Calculate proportions and counts from the summary table
+  proportions_variable <- proportions_summary / sum(proportions_summary)
+  counts_variable <- proportions_summary
+  
+  # Combine factor levels, proportions, and counts into a data frame
+  proportions_df <- data.frame(Factor_Level = factor_levels, Proportion = proportions_variable, Count = counts_variable)
+  
+  # Print the proportions and counts for each level of the variable
+  cat("Proportions and counts for", variable_name, ":\n")
+  print(proportions_df)
+  
+  return(proportions_df)
+}
+
+# List of variables to process
+non_continuous_variables <- c("Sex", "Metro_NonMet", "Region", "Education", "White" ,"Marital_status", "Current_smoking", "Medicaid" ,"Medicare_Advantage", "Panel_factor", "Disabled", "CHF_factor" ,  "ASCVD" ,  "self_report_diabetes_only.b", "Insulin_exSGLT2i_GLP1RA", "Oral_DM_med_exSGLT2i_GLP1RA")
+
+# Initialize an empty data frame to store results
+all_proportions_df <- data.frame()
+
+# Calculate survey means and quartiles
+means_result <- calculate_survey_means(your_survey_design)
+quartiles_result_all <- calculate_survey_quartiles_all(your_survey_design, ~INCOME_H + Age + Charlson_QUAN + ADL + Risk_CVD_event + Drinking +DM_duration_years +Total.OOP.ex.PME +Total.Non.Hypo.OOP  +Total.Non.TD.hypo.OOP+ BMI + Glycemic_control_numeric )
+
+# Loop through the list and calculate proportions for each variable
+for (variable in non_continuous_variables) {
+  proportions_df <- calculate_proportions(variable, your_survey_design)
+  
+  # Append results to the combined data frame
+  all_proportions_df <- rbind(all_proportions_df, proportions_df)
+}
+
+# Print the means, quartiles, and proportions data frames
+print(means_result)
+print(quartiles_result_all)
+print(all_proportions_df)
+
+# Export results to CSV with variable names
+setwd("H:/MCBS_summary_stats")
+write.csv(means_result, file = paste0("mean_", your_survey_design_name, ".csv"), row.names = FALSE)
+write.csv(quartiles_result_all, file = paste0("quartiles_", your_survey_design_name, ".csv"), row.names = FALSE)
+write.csv(all_proportions_df, file = paste0("combined_proportions_", your_survey_design_name, ".csv"), row.names = FALSE)
+
+# Replace 'variable_list' with the list of actual variable names
+variable_list <- c( "INCOME_H", "Age", "Charlson_QUAN", "ADL", "Risk_CVD_event",  "CHF_factor" ,  "ASCVD" , "Sex", "Metro_NonMet", "Region", "Education", "White", "Glycemic_control_numeric", "Marital_status", "Current_smoking","Drinking" ,  "Medicaid", "Medicare_Advantage", "Health_insurance", "DM_duration_years", "Panel_factor", "Disabled", "self_report_diabetes_only.b", "Insulin_exSGLT2i_GLP1RA", "Oral_DM_med_exSGLT2i_GLP1RA","Total.OOP.ex.PME" , "Total.Non.Hypo.OOP", 'Total.Non.TD.hypo.OOP', "BMI" )
+
+# Initialize an empty list to store results
+results_list <- list()
+
+# Iterate over the list of variables
+for (variable in variable_list) {
+  # Calculate the count of missing values for each variable
+  missing_count <- svytotal(~is.na(get(variable)), design = your_survey_design)
+  
+  # Calculate the total number of observations for each variable (including missing)...change depending on SGLT2i or GLP1RA
+  total_obs <- svytotal(~diabetes, design = your_survey_design, na.rm = FALSE)
+  
+  # Calculate the percentage of missing values for each variable
+  percentage_missing <- (missing_count / total_obs) * 100
+  
+  # Store the results in the list
+ results_list[[variable]] <- c(missing_count, percentage_missing)
+}
+
+# Print the results
+print(results_list)
+
+# Convert the results list to a data frame
+results_df <- data.frame(results_list)
+
+# Write the data frame to a CSV file
+write.csv(results_df, file = paste0("missing_", your_survey_design_name, ".csv"), row.names = FALSE)
+```
+
+#Create offset variables
+```{r}
+#create an offset variable for 
+weighted_SGLT2i_population_two_year_weights <- update(weighted_SGLT2i_population_two_year_weights, offset_var_SGLT2i = log(max_SGLT2i_OC_days_denominator))
+#sort(colnames(weighted_SGLT2i_population_two_year_weights))
+
+weighted_GLP1RA_population_two_year_weights <- update(weighted_GLP1RA_population_two_year_weights, offset_var_GLP1RA = log(max_GLP1RA_OC_days_denominator))
+#sort(colnames(weighted_GLP1RA_population_two_year_weights))
+
+weighted_GLP1RA_population_two_year_weights_low_income <- update(weighted_GLP1RA_population_two_year_weights_low_income, offset_var_GLP1RA = log(max_GLP1RA_OC_days_denominator))
+
+weighted_GLP1RA_population_two_year_weights_high_income <- update(weighted_GLP1RA_population_two_year_weights_high_income, offset_var_GLP1RA = log(max_GLP1RA_OC_days_denominator))
+
+weighted_SGLT2i_population_two_year_weights_low_income <- update(weighted_SGLT2i_population_two_year_weights_low_income, offset_var_SGLT2i = log(max_SGLT2i_OC_days_denominator))
+
+weighted_SGLT2i_population_two_year_weights_high_income <-update(weighted_SGLT2i_population_two_year_weights_high_income, offset_var_SGLT2i = log(max_SGLT2i_OC_days_denominator))
+```
+
+# Check which variables are not in the dataset
+```{r}
+# Extract variables from the GLP1RA formula
+model_vars <- all.vars(Final_GLP1RA_Supply_OC ~ PDC_GLP1RA_BL + INCOME_H + Total_GLP1RA_OOP_BL + Age + factor(Sex) +  Charlson_QUAN + ADL + BMI + Risk_CVD_event+ factor(Metro) + factor(Region) + factor(Education) + factor(White) + factor(Marital_status) + factor(Medicaid) + factor(Medicare_Advantage) +CHF_factor+ASCVD+ DM_duration_years +factor(Current_smoking)+ Drinking+ Care_Setting.b + Total.OOP.ex.PME+ Total.Non.Hypo.OOP+ Total.Non.GLP1RA.hypo.OOP+ factor(Insulin_exGLP1RA) + factor(Oral_DM_med_exGLP1RA)+ Panel_factor+ offset(offset_var_GLP1RA))
+
+# Check which variables are not in the dataset
+missing_vars <- setdiff(model_vars, colnames(weighted_GLP1RA_population_two_year_weights))
+
+# Print the missing variables
+if (length(missing_vars) > 0) {
+  cat("The following variables are not in the dataset:\n")
+  print(missing_vars)
+} else {
+  cat("All variables are present in the dataset.\n")
+}
+
+# Extract variables from the SGLT2i formula
+model_vars <- all.vars(Final_SGLT2i_Supply_OC ~ PDC_SGLT2i_BL + INCOME_H + Total_SGLT2i_OOP_BL + Age + factor(Sex) +  Charlson_QUAN + ADL + BMI + Risk_CVD_event+ factor(Metro) + factor(Region) + factor(Education) + factor(White) + factor(Marital_status) + factor(Medicaid) + factor(Medicare_Advantage) + DM_duration_years +CHF_factor+ASCVD+ factor(Current_smoking)+ Drinking+ Care_Setting.b + Total.OOP.ex.PME+ Total.Non.Hypo.OOP+ Total.Non.SGLT2i.hypo.OOP+ factor(Insulin_exSGLT2i) + factor(Oral_DM_med_exSGLT2i)+ Panel_factor+ offset(offset_var_SGLT2i))
+
+# Check which variables are not in the dataset
+missing_vars <- setdiff(model_vars, colnames(weighted_SGLT2i_population_two_year_weights))
+
+# Print the missing variables
+if (length(missing_vars) > 0) {
+  cat("The following variables are not in the dataset:\n")
+  print(missing_vars)
+} else {
+  cat("All variables are present in the dataset.\n")
+}
+```
+# calculating observed outcome adherence
+## GLP1RA
+```{r}
+weighted_GLP1RA_population_two_year_weights<- update(weighted_GLP1RA_population_two_year_weights, outcome_adherence_GLP1RA = GLP1RA_PDC_num_OC / max_GLP1RA_OC_days_denominator)
+weighted_GLP1RA_population_two_year_weights_low_income<- update(weighted_GLP1RA_population_two_year_weights_low_income, outcome_adherence_GLP1RA = GLP1RA_PDC_num_OC / max_GLP1RA_OC_days_denominator)
+weighted_GLP1RA_population_two_year_weights_high_income<- update(weighted_GLP1RA_population_two_year_weights_high_income, outcome_adherence_GLP1RA = GLP1RA_PDC_num_OC / max_GLP1RA_OC_days_denominator)
+your_population<-weighted_GLP1RA_population_two_year_weights
+
+# Calculate mean, median, IQR, and CI for outcome_adherence_GLP1RA
+mean_GLP1RA <- svymean(~outcome_adherence_GLP1RA, your_population)
+median_GLP1RA <- svyquantile(~outcome_adherence_GLP1RA, your_population, quantiles = 0.5)
+iqr_GLP1RA <- svyquantile(~outcome_adherence_GLP1RA, your_population, quantiles = c(0.25, 0.75))
+ci_GLP1RA <- confint(mean_GLP1RA)
+
+# Print results for GLP1RA
+cat("GLP1RA Adherence Statistics:\n")
+cat("Mean:", mean_GLP1RA, "\n")
+median_GLP1RA # Extract median value from svyquantile object
+iqr_GLP1RA  # Extract quartiles from svyquantile object
+cat("CI:" , ci_GLP1RA, "\n")
+```
+##SGLT2i
+```{r}
+#calculating observed outcome adherence
+weighted_SGLT2i_population_two_year_weights <- update(weighted_SGLT2i_population_two_year_weights, outcome_adherence_SGLT2i = SGLT2i_PDC_num_OC / max_SGLT2i_OC_days_denominator)
+weighted_SGLT2i_population_two_year_weights_low_income <- update(weighted_SGLT2i_population_two_year_weights_low_income, outcome_adherence_SGLT2i = SGLT2i_PDC_num_OC / max_SGLT2i_OC_days_denominator)
+weighted_SGLT2i_population_two_year_weights_high_income <- update(weighted_SGLT2i_population_two_year_weights_high_income, outcome_adherence_SGLT2i = SGLT2i_PDC_num_OC / max_SGLT2i_OC_days_denominator)
+youe_population<- weighted_SGLT2i_population_two_year_weights
+
+# Calculate mean, median, IQR, and CI for outcome_adherence_SGLT2i
+mean_SGLT2i <- svymean(~outcome_adherence_SGLT2i, youe_population)
+median_SGLT2i <- svyquantile(~outcome_adherence_SGLT2i, youe_population, quantiles = 0.5)
+iqr_SGLT2i <- svyquantile(~outcome_adherence_SGLT2i, youe_population, quantiles = c(0.25, 0.75))
+ci_SGLT2i <- confint(mean_SGLT2i)
+
+# Print results for SGLT2i
+cat("SGLT2i_PDC Adherence Statistics:\n")
+cat("Mean:", mean_SGLT2i, "\n")
+median_SGLT2i # Extract median value from svyquantile object
+iqr_SGLT2i  # Extract quartiles from svyquantile object
+cat("CI:" , ci_SGLT2i, "\n")
+```
+#otucome_days_covered
+## GLP
+```{r}
+svymean(~GLP1RA_PDC_num_OC, weighted_GLP1RA_population_two_year_weights_low_income)
+svyvar(~GLP1RA_PDC_num_OC, weighted_GLP1RA_population_two_year_weights_low_income)
+```
+## SGLT
+```{r}
+svymean(~SGLT2i_PDC_num_OC, weighted_SGLT2i_population_two_year_weights_low_income)
+svyvar(~SGLT2i_PDC_num_OC, weighted_SGLT2i_population_two_year_weights_low_income)
+```
+#RANGE OF OOP per 30-day supply 
+```{r}
+SGLT_OOP_per_SUPPLY_RANGE<- svyquantile(~ SGLT2i_OOP_supply_ratio, 
+                                        design = weighted_SGLT2i_population_two_year_weights, 
+                                        quantiles = c(0, .5, 1),    na.rm = TRUE)
+SGLT_OOP_per_SUPPLY_RANGE
+
+
+GLP_OOP_per_SUPPLY_RANGE<- svyquantile(~ GLP1RA_OOP_supply_ratio, 
+                                        design = weighted_GLP1RA_population_two_year_weights, 
+                                        quantiles = c(0,.5, 1),    na.rm = TRUE)
+GLP_OOP_per_SUPPLY_RANGE
+```
+#summary statistics_target drugs
+##GLP1RA
+```{r}
+# ADJUST Replace 'weighted_GLP1RA_population_two_year_weights' with your actual survey design object
+your_survey_design <- weighted_GLP1RA_population_two_year_weights
+your_survey_design_name <- "GLP1RA" 
+
+# Function to calculate survey means for continuous predictors
+calculate_survey_means <- function(survey_design) {
+  survey_means <- svymean(~Final_GLP1RA_Supply_BL+ PDC_GLP1RA_BL+ MPR_GLP1RA_BL+ GLP1RA_OOP_covered_ratio+ GLP1RA_OOP_supply_ratio+ INCOME_H + Age + Charlson_QUAN + ADL + Risk_CVD_event + Drinking + DM_duration_years+Total_GLP1RA_OOP_BL + Total.OOP.ex.PME + Total.Non.Hypo.OOP + 
+Total.Non.GLP1RA.hypo.OOP+ BMI + Glycemic_control_numeric, design = survey_design, na.rm = TRUE)
+
+  # Extract mean values from survey object
+  means <- coef(survey_means)
+
+  # Create a dataframe for the means with variable names
+  means_dataframe <- data.frame(Variable = names(means), Mean = means)
+
+  return(means_dataframe)
+}
+
+# Function to calculate survey quartiles for all continuous predictors
+calculate_survey_quartiles_all <- function(survey_design, formula) {
+  # Extract variable names from the formula
+  variable_names <- all.vars(formula)
+
+  # Initialize an empty list to store results for each variable
+  results_list <- list()
+
+  # Loop through each variable and calculate quartiles
+  for (variable in variable_names) {
+    survey_quartiles <- svyquantile(as.formula(paste0("~", variable)), design = survey_design, c(0, 0.25, 0.5, 0.75, 1), na.rm = TRUE)
+
+    # Extract quartile values from survey object
+    quartiles <- as.data.frame(t(coef(survey_quartiles)))
+
+    # Create a dataframe for the quartiles with variable names
+    quartiles_dataframe <- data.frame(
+      Variable = variable,
+      Q0 = quartiles[, 1],
+      Q25 = quartiles[, 2],
+      Q50 = quartiles[, 3],
+      Q75 = quartiles[, 4],
+      Q100 = quartiles[, 5]
+    )
+
+    # Add the results to the list
+    results_list[[variable]] <- quartiles_dataframe
+  }
+
+  # Combine results into a single dataframe
+  result_dataframe <- do.call(rbind, results_list)
+
+  return(result_dataframe)
+}
+
+# Function to calculate proportions and counts for a given variable
+calculate_proportions <- function(variable_name, survey_design) {
+  # Create a summary table for proportions and counts of each level of the variable
+  proportions_summary <- svytotal(as.formula(paste("~factor(", variable_name, ")")), design = survey_design, na.rm=TRUE)
+  
+  # Get factor levels and their labels using the survey design
+  factor_levels <- levels(survey_design$variables[[variable_name]])
+  
+  # Calculate proportions and counts from the summary table
+  proportions_variable <- proportions_summary / sum(proportions_summary)
+  counts_variable <- proportions_summary
+  
+  # Combine factor levels, proportions, and counts into a data frame
+  proportions_df <- data.frame(Factor_Level = factor_levels, Proportion = proportions_variable, Count = counts_variable)
+  
+  # Print the proportions and counts for each level of the variable
+  cat("Proportions and counts for", variable_name, ":\n")
+  print(proportions_df)
+  
+  return(proportions_df)
+}
+
+# List of variables to process
+non_continuous_variables <- c("Sex", "White" ,"Marital_status", "Education",  "Region", "Metro_NonMet", "Disabled", "Medicaid" ,"Medicare_Advantage",   "CHF_factor" ,  "ASCVD" ,  "Current_smoking", "Panel_factor","self_report_diabetes_only.b", "Insulin_exGLP1RA", "Oral_DM_med_exGLP1RA", "has_SGLT2i_factor")
+
+# Initialize an empty data frame to store results
+all_proportions_df <- data.frame()
+
+# Calculate survey means and quartiles
+means_result <- calculate_survey_means(your_survey_design)
+quartiles_result_all <- calculate_survey_quartiles_all(your_survey_design, ~Final_GLP1RA_Supply_BL+ PDC_GLP1RA_BL+ MPR_GLP1RA_BL + GLP1RA_OOP_covered_ratio+ GLP1RA_OOP_supply_ratio+  INCOME_H + Age + Charlson_QUAN + ADL + Risk_CVD_event + Drinking +DM_duration_years+Drinking+Total_GLP1RA_OOP_BL + Total.OOP.ex.PME + Total.Non.Hypo.OOP + Total.Non.GLP1RA.hypo.OOP + BMI+ Glycemic_control_numeric)
+
+# Loop through the list and calculate proportions for each variable
+for (variable in non_continuous_variables) {
+  proportions_df <- calculate_proportions(variable, your_survey_design)
+  
+  # Append results to the combined data frame
+  all_proportions_df <- rbind(all_proportions_df, proportions_df)
+}
+
+# Print the means, quartiles, and proportions data frames
+print(means_result)
+print(quartiles_result_all)
+print(all_proportions_df)
+
+# Export results to CSV with variable names
+
+setwd("H:/MCBS_summary_stats")
+
+write.csv(means_result, file = paste0("mean_", your_survey_design_name, ".csv"), row.names = FALSE)
+write.csv(quartiles_result_all, file = paste0("quartiles_", your_survey_design_name, ".csv"), row.names = FALSE)
+write.csv(all_proportions_df, file = paste0("combined_proportions_", your_survey_design_name, ".csv"), row.names = FALSE)
+
+# Replace 'variable_list' with the list of actual variable names
+variable_list <- c("Final_GLP1RA_Supply_BL" , "GLP1RA_OOP_covered_ratio" ,"GLP1RA_OOP_supply_ratio", "PDC_GLP1RA_BL",  "MPR_GLP1RA_BL", "INCOME_H", "Age", "Charlson_QUAN", "ADL", "Risk_CVD_event" , "Glycemic_control_numeric",  "CHF_factor" ,  "ASCVD" ,"Total_GLP1RA_OOP_BL", "Total.OOP.ex.PME", "Total.Non.Hypo.OOP", "Total.Non.GLP1RA.hypo.OOP", "Sex", "Metro_NonMet", "Region", "Education", "White", "Marital_status", "Current_smoking",  "Medicaid", "Medicare_Advantage", "Health_insurance","Care_Setting.b", "DM_duration_years", "Insulin_exGLP1RA", "Oral_DM_med_exGLP1RA", "Panel_factor", "Disabled", "self_report_diabetes_only.b", "BMI", "has_SGLT2i_factor")
+
+# Initialize an empty list to store results
+results_list <- list()
+
+# Iterate over the list of variables
+for (variable in variable_list) {
+  # Calculate the count of missing values for each variable
+  missing_count <- svytotal(~is.na(get(variable)), design = your_survey_design)
+  
+  # Calculate the total number of observations for each variable (including missing)...change depending on GLP1RA or GLP1RA
+  total_obs <- svytotal(~GLP1RA.b, design = your_survey_design, na.rm = FALSE)
+  
+  # Calculate the percentage of missing values for each variable
+  percentage_missing <- (missing_count / total_obs) * 100
+  
+  # Store the results in the list
+ results_list[[variable]] <- c(missing_count, percentage_missing)
+}
+
+# Print the results
+print(results_list)
+
+# Convert the results list to a data frame
+results_df <- data.frame(results_list)
+
+# Write the data frame to a CSV file
+write.csv(results_df, file = paste0("missing_", your_survey_design_name, ".csv"), row.names = FALSE)
+```
+## SGLT2i
+```{r}
+# ADJUST Replace 'weighted_SGLT2i_population_two_year_weights' with your actual survey design object
+your_survey_design <- weighted_SGLT2i_population_two_year_weights
+your_survey_design_name <- "SGLT2i" 
+
+# Function to calculate survey means for continuous predictors
+calculate_survey_means <- function(survey_design) {
+  survey_means <- svymean(~Final_SGLT2i_Supply_BL+ PDC_SGLT2i_BL+  MPR_SGLT2i_BL + SGLT2i_OOP_covered_ratio+ SGLT2i_OOP_supply_ratio+ INCOME_H + Age + Charlson_QUAN + ADL + Risk_CVD_event + Drinking +DM_duration_years+Total_SGLT2i_OOP_BL + Total.OOP.ex.PME + Total.Non.Hypo.OOP + 
+Total.Non.SGLT2i.hypo.OOP+ BMI + Glycemic_control_numeric, design = survey_design, na.rm = TRUE)
+
+  # Extract mean values from survey object
+  means <- coef(survey_means)
+
+  # Create a dataframe for the means with variable names
+  means_dataframe <- data.frame(Variable = names(means), Mean = means)
+
+  return(means_dataframe)
+}
+
+# Function to calculate survey quartiles for all continuous predictors
+calculate_survey_quartiles_all <- function(survey_design, formula) {
+  # Extract variable names from the formula
+  variable_names <- all.vars(formula)
+
+  # Initialize an empty list to store results for each variable
+  results_list <- list()
+
+  # Loop through each variable and calculate quartiles
+  for (variable in variable_names) {
+    survey_quartiles <- svyquantile(as.formula(paste0("~", variable)), design = survey_design, c(0, 0.25, 0.5, 0.75, 1), na.rm = TRUE)
+
+    # Extract quartile values from survey object
+    quartiles <- as.data.frame(t(coef(survey_quartiles)))
+
+    # Create a dataframe for the quartiles with variable names
+    quartiles_dataframe <- data.frame(
+      Variable = variable,
+      Q0 = quartiles[, 1],
+      Q25 = quartiles[, 2],
+      Q50 = quartiles[, 3],
+      Q75 = quartiles[, 4],
+      Q100 = quartiles[, 5]
+    )
+
+    # Add the results to the list
+    results_list[[variable]] <- quartiles_dataframe
+  }
+
+  # Combine results into a single dataframe
+  result_dataframe <- do.call(rbind, results_list)
+
+  return(result_dataframe)
+}
+
+# Function to calculate proportions and counts for a given variable
+calculate_proportions <- function(variable_name, survey_design) {
+  # Create a summary table for proportions and counts of each level of the variable
+  proportions_summary <- svytotal(as.formula(paste("~factor(", variable_name, ")")), design = survey_design, na.rm=TRUE)
+  
+  # Get factor levels and their labels using the survey design
+  factor_levels <- levels(survey_design$variables[[variable_name]])
+  
+  # Calculate proportions and counts from the summary table
+  proportions_variable <- proportions_summary / sum(proportions_summary)
+  counts_variable <- proportions_summary
+  
+  # Combine factor levels, proportions, and counts into a data frame
+  proportions_df <- data.frame(Factor_Level = factor_levels, Proportion = proportions_variable, Count = counts_variable)
+  
+  # Print the proportions and counts for each level of the variable
+  cat("Proportions and counts for", variable_name, ":\n")
+  print(proportions_df)
+  
+  return(proportions_df)
+}
+
+# List of variables to process
+non_continuous_variables <- c("Sex", "Metro_NonMet", "Region", "Education", "White",  "Marital_status", "Current_smoking",   "Medicare_Advantage",  "Care_Setting.b", "Insulin_exSGLT2i", "Oral_DM_med_exSGLT2i", "Panel_factor", "Disabled", "self_report_diabetes_only.b", "has_GLP1RA_factor")
+
+# Initialize an empty data frame to store results
+all_proportions_df <- data.frame()
+
+# Calculate survey means and quartiles
+means_result <- calculate_survey_means(your_survey_design)
+quartiles_result_all <- calculate_survey_quartiles_all(your_survey_design, ~Final_SGLT2i_Supply_BL+ PDC_SGLT2i_BL+ MPR_SGLT2i_BL+ SGLT2i_OOP_covered_ratio+ SGLT2i_OOP_supply_ratio+  INCOME_H + Age + Charlson_QUAN + ADL + Risk_CVD_event + DM_duration_years+Drinking+Total_SGLT2i_OOP_BL + Total.OOP.ex.PME + Total.Non.Hypo.OOP + Total.Non.SGLT2i.hypo.OOP + BMI+ Glycemic_control_numeric)
+
+# Loop through the list and calculate proportions for each variable
+for (variable in non_continuous_variables) {
+  proportions_df <- calculate_proportions(variable, your_survey_design)
+  
+  # Append results to the combined data frame
+  all_proportions_df <- rbind(all_proportions_df, proportions_df)
+}
+
+# Print the means, quartiles, and proportions data frames
+print(means_result)
+print(quartiles_result_all)
+print(all_proportions_df)
+
+# Export results to CSV with variable names
+
+setwd("H:/MCBS_summary_stats")
+
+write.csv(means_result, file = paste0("mean_", your_survey_design_name, ".csv"), row.names = FALSE)
+write.csv(quartiles_result_all, file = paste0("quartiles_", your_survey_design_name, ".csv"), row.names = FALSE)
+write.csv(all_proportions_df, file = paste0("combined_proportions_", your_survey_design_name, ".csv"), row.names = FALSE)
+
+# Replace 'variable_list' with the list of actual variable names
+variable_list <- c("Final_SGLT2i_Supply_BL" , "SGLT2i_OOP_covered_ratio",  "SGLT2i_OOP_supply_ratio", "PDC_SGLT2i_BL", "MPR_SGLT2i_BL", "INCOME_H", "Age", "Charlson_QUAN", "ADL", "Risk_CVD_event" , "Glycemic_control_numeric",  "CHF_factor" ,  "ASCVD" ,"Total_SGLT2i_OOP_BL", "Total.OOP.ex.PME", "Total.Non.Hypo.OOP", "Total.Non.SGLT2i.hypo.OOP", "Sex", "Metro_NonMet", "Region", "Education", "White", "Marital_status", "Current_smoking",  "Medicare_Advantage", "Health_insurance","Care_Setting.b", "DM_duration_years", "Insulin_exSGLT2i", "Oral_DM_med_exSGLT2i", "Panel_factor", "Disabled", "self_report_diabetes_only.b", "BMI", "has_GLP1RA_factor")
+
+# Initialize an empty list to store results
+results_list <- list()
+
+# Iterate over the list of variables
+for (variable in variable_list) {
+  # Calculate the count of missing values for each variable
+  missing_count <- svytotal(~is.na(get(variable)), design = your_survey_design)
+  
+  # Calculate the total number of observations for each variable (including missing)...change depending on SGLT2i or SGLT2i
+  total_obs <- svytotal(~SGLT2i.b, design = your_survey_design, na.rm = FALSE)
+  
+  # Calculate the percentage of missing values for each variable
+  percentage_missing <- (missing_count / total_obs) * 100
+  
+  # Store the results in the list
+ results_list[[variable]] <- c(missing_count, percentage_missing)
+}
+
+# Print the results
+print(results_list)
+
+# Convert the results list to a data frame
+results_df <- data.frame(results_list)
+
+# Write the data frame to a CSV file
+write.csv(results_df, file = paste0("missing_", your_survey_design_name, ".csv"), row.names = FALSE)
+```
+# Defining Models 
+## set the income variable we will use
+```{r}
+INCOME_VARIABLE<-"I(INCOME_H/10000)"
+INCOME_VARIABLE_name<- "continuous"
+INCOME_VARIABLE_factor<- factor(INCOME_VARIABLE)
+```
+
+## create models
+### PDC
+#### GLP1RA
+```{r}
+simple_GLP1RA_PDC <- as.formula(paste("GLP1RA_PDC_num_OC ~ log(PDC_GLP1RA_BL)  + I(INCOME_H/10000)+ I(Total_GLP1RA_OOP_BL/100) + I(Age/10) +  factor(Sex) +factor(White) + Panel_factor + offset(offset_var_GLP1RA)"))
+
+complex_GLP1RA_PDC <- as.formula(
+  "GLP1RA_PDC_num_OC ~ log(PDC_GLP1RA_BL) + I(INCOME_H/10000) + 
+  I(Total_GLP1RA_OOP_BL/100) + I(Age/10) + Sex + White + Panel_factor + 
+  Marital_status + Education + Region + Metro_NonMet + Medicare_Advantage + 
+  Disabled + I(BMI/5) + Charlson_QUAN + Risk_CVD_event + ADL + 
+   Current_smoking + Drinking + CHF_factor + ASCVD + I(DM_duration_years/5) + 
+  factor(Insulin_exGLP1RA) + factor(Oral_DM_med_exGLP1RA) + 
+  Glycemic_control_numeric + offset(offset_var_GLP1RA)"
+)
+
+complex_GLP1RA_PDC_int <- as.formula(
+  "GLP1RA_PDC_num_OC ~ log(PDC_GLP1RA_BL) + I(INCOME_H/10000) * 
+  I(Total_GLP1RA_OOP_BL/100) + I(Age/10) + Sex + White + Panel_factor + 
+  Marital_status + Education + Region + Metro_NonMet + Medicare_Advantage + 
+  Disabled + I(BMI/5) + Charlson_QUAN + Risk_CVD_event + ADL + 
+   Current_smoking + Drinking +  CHF_factor + ASCVD + I(DM_duration_years/5) + 
+  factor(Insulin_exGLP1RA) + factor(Oral_DM_med_exGLP1RA) + 
+  Glycemic_control_numeric + offset(offset_var_GLP1RA)"
+)
+
+complex_GLP1RA_PDC_Medicaid <- as.formula(
+  "GLP1RA_PDC_num_OC ~ log(PDC_GLP1RA_BL)  + I(INCOME_H/10000) + 
+  Medicaid + I(Age/10) + Sex + White + Panel_factor + Marital_status + 
+  Education + Region + Metro_NonMet + Medicare_Advantage + Disabled + 
+  I(BMI/5) + Charlson_QUAN + Risk_CVD_event + ADL +  Current_smoking + Drinking +  
+  CHF_factor + ASCVD + I(DM_duration_years/5) + factor(Insulin_exGLP1RA) + 
+  factor(Oral_DM_med_exGLP1RA) + Glycemic_control_numeric + 
+  offset(offset_var_GLP1RA)"
+)
+
+complex_GLP1RA_PDC_Medicaid_OOP <- as.formula(
+  "GLP1RA_PDC_num_OC ~ log(PDC_GLP1RA_BL)  + I(INCOME_H/10000) + 
+  I(Total_GLP1RA_OOP_BL/100) + Medicaid + I(Age/10) + Sex + White + 
+  Panel_factor + Marital_status + Education + Region + Metro_NonMet + 
+  Medicare_Advantage + Disabled + I(BMI/5) + Charlson_QUAN + Risk_CVD_event + 
+  ADL +  Current_smoking + Drinking +  CHF_factor + ASCVD + I(DM_duration_years/5) + 
+  factor(Insulin_exGLP1RA) + factor(Oral_DM_med_exGLP1RA) + 
+  Glycemic_control_numeric + offset(offset_var_GLP1RA)" )
+```
+
+#### SGLT2i
+```{r}
+simple_SGLT2i_PDC <- as.formula(paste("SGLT2i_PDC_num_OC ~ log(PDC_SGLT2i_BL)  + I(INCOME_H/10000) + I(Total_SGLT2i_OOP_BL/100) + I(Age/10) + Sex +White + Panel_factor + offset(offset_var_SGLT2i)"))
+
+complex_SGLT2i_PDC <- as.formula(
+  "SGLT2i_PDC_num_OC ~ log(PDC_SGLT2i_BL) + I(INCOME_H/10000) + 
+  I(Total_SGLT2i_OOP_BL/100) + I(Age/10) + Sex + White + Panel_factor + 
+  Marital_status + Education + Region + Metro_NonMet + Medicare_Advantage + 
+  Disabled + I(BMI/5) + Charlson_QUAN + Risk_CVD_event + ADL + 
+   Current_smoking + Drinking +  CHF_factor + ASCVD + I(DM_duration_years/5) + 
+  factor(Insulin_exSGLT2i) + factor(Oral_DM_med_exSGLT2i) + 
+  Glycemic_control_numeric + offset(offset_var_SGLT2i)"
+)
+
+complex_SGLT2i_PDC_int <- as.formula(
+  "SGLT2i_PDC_num_OC ~ log(PDC_SGLT2i_BL) + I(INCOME_H/10000) * 
+  I(Total_SGLT2i_OOP_BL/100) + I(Age/10) + Sex + White + Panel_factor + 
+  Marital_status + Education + Region + Metro_NonMet + Medicare_Advantage + 
+  Disabled + I(BMI/5) + Charlson_QUAN + Risk_CVD_event + ADL + 
+   Current_smoking + Drinking +  CHF_factor + ASCVD + I(DM_duration_years/5) + 
+  factor(Insulin_exSGLT2i) + factor(Oral_DM_med_exSGLT2i) + 
+  Glycemic_control_numeric + offset(offset_var_SGLT2i)"
+)
+
+complex_SGLT2i_PDC_Medicaid <- as.formula(
+  "SGLT2i_PDC_num_OC ~ log(PDC_SGLT2i_BL) + I(INCOME_H/10000) + 
+  Medicaid + I(Age/10) + Sex + White + Panel_factor + Marital_status + 
+  Education + Region + Metro_NonMet + Medicare_Advantage + Disabled + 
+  I(BMI/5) + Charlson_QUAN + Risk_CVD_event + ADL +  Current_smoking + Drinking +  
+  CHF_factor + ASCVD + I(DM_duration_years/5) + factor(Insulin_exSGLT2i) + 
+  factor(Oral_DM_med_exSGLT2i) + Glycemic_control_numeric + 
+  offset(offset_var_SGLT2i)"
+)
+
+complex_SGLT2i_PDC_Medicaid_OOP <- as.formula(
+  "SGLT2i_PDC_num_OC ~ log(PDC_SGLT2i_BL) + I(INCOME_H/10000) + 
+  I(Total_SGLT2i_OOP_BL/100) + Medicaid + I(Age/10) + Sex + White + 
+  Panel_factor + Marital_status + Education + Region + Metro_NonMet + 
+  Medicare_Advantage + Disabled + I(BMI/5) + Charlson_QUAN + Risk_CVD_event + 
+  ADL +  Current_smoking + Drinking +  CHF_factor + ASCVD + I(DM_duration_years/5) + 
+  factor(Insulin_exSGLT2i) + factor(Oral_DM_med_exSGLT2i) + 
+  Glycemic_control_numeric + offset(offset_var_SGLT2i)" )
+
+```
+### Linear
+#### GLP1RA
+```{r}
+simple_GLP1RA_PDC_linear <- as.formula(paste("I(GLP1RA_PDC_num_OC/max_GLP1RA_OC_days_denominator)  ~ I(PDC_GLP1RA_BL/0.1)  + I(INCOME_H/10000)+ I(Total_GLP1RA_OOP_BL/100) + I(Age/10) +  factor(Sex) +factor(White) + Panel_factor"))
+
+complex_GLP1RA_PDC_linear <- as.formula(
+  "I(GLP1RA_PDC_num_OC/max_GLP1RA_OC_days_denominator) ~ I(PDC_GLP1RA_BL/0.1) + I(INCOME_H/10000) + 
+  I(Total_GLP1RA_OOP_BL/100) + I(Age/10) + Sex + White + Panel_factor + 
+  Marital_status + Education + Region + Metro_NonMet + Medicare_Advantage + 
+  Disabled + I(BMI/5) + Charlson_QUAN + Risk_CVD_event + ADL + 
+   Current_smoking + Drinking + CHF_factor + ASCVD + I(DM_duration_years/5) + 
+  factor(Insulin_exGLP1RA) + factor(Oral_DM_med_exGLP1RA) + 
+  Glycemic_control_numeric"
+)
+
+complex_GLP1RA_PDC_int_linear <- as.formula(
+  "I(GLP1RA_PDC_num_OC/max_GLP1RA_OC_days_denominator) ~ I(PDC_GLP1RA_BL/0.1) + I(INCOME_H/10000) * 
+  I(Total_GLP1RA_OOP_BL/100) + I(Age/10) + Sex + White + Panel_factor + 
+  Marital_status + Education + Region + Metro_NonMet + Medicare_Advantage + 
+  Disabled + I(BMI/5) + Charlson_QUAN + Risk_CVD_event + ADL + 
+   Current_smoking + Drinking +  CHF_factor + ASCVD + I(DM_duration_years/5) + 
+  factor(Insulin_exGLP1RA) + factor(Oral_DM_med_exGLP1RA) + 
+  Glycemic_control_numeric"
+)
+
+complex_GLP1RA_PDC_Medicaid_linear <- as.formula(
+  "I(GLP1RA_PDC_num_OC/max_GLP1RA_OC_days_denominator)~ I(PDC_GLP1RA_BL/0.1) + I(INCOME_H/10000) + 
+  Medicaid + I(Age/10) + Sex + White + Panel_factor + Marital_status + 
+  Education + Region + Metro_NonMet + Medicare_Advantage + Disabled + 
+  I(BMI/5) + Charlson_QUAN + Risk_CVD_event + ADL +  Current_smoking + Drinking +  
+  CHF_factor + ASCVD + I(DM_duration_years/5) + factor(Insulin_exGLP1RA) + 
+  factor(Oral_DM_med_exGLP1RA) + Glycemic_control_numeric"
+)
+
+complex_GLP1RA_PDC_Medicaid_OOP_linear <- as.formula(
+  "I(GLP1RA_PDC_num_OC/max_GLP1RA_OC_days_denominator) ~ I(PDC_GLP1RA_BL/0.1) + I(INCOME_H/10000) + 
+  I(Total_GLP1RA_OOP_BL/100) + Medicaid + I(Age/10) + Sex + White + 
+  Panel_factor + Marital_status + Education + Region + Metro_NonMet + 
+  Medicare_Advantage + Disabled + I(BMI/5) + Charlson_QUAN + Risk_CVD_event + 
+  ADL +  Current_smoking + Drinking +  CHF_factor + ASCVD + I(DM_duration_years/5) + 
+  factor(Insulin_exGLP1RA) + factor(Oral_DM_med_exGLP1RA) + 
+  Glycemic_control_numeric" )
+```
+
+#### SGLT2i
+```{r}
+simple_SGLT2i_PDC_linear <- as.formula(paste("I(SGLT2i_PDC_num_OC/max_SGLT2i_OC_days_denominator) ~ I(PDC_SGLT2i_BL/0.1)  + I(INCOME_H/10000) + I(Total_SGLT2i_OOP_BL/100) + I(Age/10) + Sex +White + Panel_factor"))
+
+complex_SGLT2i_PDC_linear <- as.formula(
+  "I(SGLT2i_PDC_num_OC/max_SGLT2i_OC_days_denominator) ~ I(PDC_SGLT2i_BL/0.1) + I(INCOME_H/10000) + 
+  I(Total_SGLT2i_OOP_BL/100) + I(Age/10) + Sex + White + Panel_factor + 
+  Marital_status + Education + Region + Metro_NonMet + Medicare_Advantage + 
+  Disabled + I(BMI/5) + Charlson_QUAN + Risk_CVD_event + ADL + 
+   Current_smoking + Drinking +  CHF_factor + ASCVD + I(DM_duration_years/5) + 
+  factor(Insulin_exSGLT2i) + factor(Oral_DM_med_exSGLT2i) + 
+  Glycemic_control_numeric"
+)
+
+complex_SGLT2i_PDC_int_linear <- as.formula(
+  "I(SGLT2i_PDC_num_OC/max_SGLT2i_OC_days_denominator) ~ I(PDC_SGLT2i_BL/0.1) + I(INCOME_H/10000) * 
+  I(Total_SGLT2i_OOP_BL/100) + I(Age/10) + Sex + White + Panel_factor + 
+  Marital_status + Education + Region + Metro_NonMet + Medicare_Advantage + 
+  Disabled + I(BMI/5) + Charlson_QUAN + Risk_CVD_event + ADL + 
+   Current_smoking + Drinking +  CHF_factor + ASCVD + I(DM_duration_years/5) + 
+  factor(Insulin_exSGLT2i) + factor(Oral_DM_med_exSGLT2i) + 
+  Glycemic_control_numeric"
+)
+
+complex_SGLT2i_PDC_Medicaid_linear <- as.formula(
+  "I(SGLT2i_PDC_num_OC/max_SGLT2i_OC_days_denominator) ~ I(PDC_SGLT2i_BL/0.1) + I(INCOME_H/10000) + 
+  Medicaid + I(Age/10) + Sex + White + Panel_factor + Marital_status + 
+  Education + Region + Metro_NonMet + Medicare_Advantage + Disabled + 
+  I(BMI/5) + Charlson_QUAN + Risk_CVD_event + ADL +  Current_smoking + Drinking +  
+  CHF_factor + ASCVD + I(DM_duration_years/5) + factor(Insulin_exSGLT2i) + 
+  factor(Oral_DM_med_exSGLT2i) + Glycemic_control_numeric"
+)
+
+complex_SGLT2i_PDC_Medicaid_OOP_linear <- as.formula(
+  "I(SGLT2i_PDC_num_OC/max_SGLT2i_OC_days_denominator) ~ I(PDC_SGLT2i_BL/0.1) + I(INCOME_H/10000) + 
+  I(Total_SGLT2i_OOP_BL/100) + Medicaid + I(Age/10) + Sex + White + 
+  Panel_factor + Marital_status + Education + Region + Metro_NonMet + 
+  Medicare_Advantage + Disabled + I(BMI/5) + Charlson_QUAN + Risk_CVD_event + 
+  ADL +  Current_smoking + Drinking +  CHF_factor + ASCVD + I(DM_duration_years/5) + 
+  factor(Insulin_exSGLT2i) + factor(Oral_DM_med_exSGLT2i) + 
+  Glycemic_control_numeric" )
+
+```
+
+##Unweighted counts used for models
+```{r}
+model_GLP1RA_1 <- svyglm(simple_GLP1RA_PDC, design = weighted_GLP1RA_population_two_year_weights_low_income, family = poisson())
+model_GLP1RA_2_3 <- svyglm(complex_GLP1RA_PDC, design = weighted_GLP1RA_population_two_year_weights_low_income, family = poisson())
+model_SGLT2i_1 <- svyglm(simple_SGLT2i_PDC, design = weighted_SGLT2i_population_two_year_weights_low_income,family = poisson())
+model_SGLT2i_2_3 <- svyglm(complex_SGLT2i_PDC, design = weighted_SGLT2i_population_two_year_weights_low_income, family = poisson())
+
+unweighted_observations_GPLP1RA_model_1 <- nrow(model.frame(model_GLP1RA_1))
+unweighted_observations_GPLP1RA_model_2_3 <- nrow(model.frame(model_GLP1RA_2_3))
+
+print(paste("Number of unweighted GLP1RA model 1observations used:", unweighted_observations_GPLP1RA_model_1))
+
+print(paste("Number of unweighted GLP1RA model 2, 3 observations used:", unweighted_observations_GPLP1RA_model_2_3))
+
+unweighted_observations_GPLP1RA_model_1 <- nrow(model.frame(model_SGLT2i_1))
+unweighted_observations_GPLP1RA_model_2_3 <- nrow(model.frame(model_SGLT2i_2_3))
+
+print(paste("Number of unweighted SGLT2i model 1 observations used:", unweighted_observations_GPLP1RA_model_1))
+
+print(paste("Number of unweighted SGLT2i model 2, 3 observations used:", unweighted_observations_GPLP1RA_model_2_3))
+```
+## weighted count used for models
+```{r}
+simple_GLP1RA_PDC <- as.formula(paste("GLP1RA_PDC_num_OC ~ log(PDC_GLP1RA_BL)  + I(INCOME_H/10000)+ I(Total_GLP1RA_OOP_BL/100) + I(Age/10) +  factor(Sex) +factor(White) + Panel_factor + offset(offset_var_GLP1RA)"))
+
+
+GLP1RA_variable_list_simple_cc <- c("GLP1RA_PDC_num_OC", "PDC_GLP1RA_BL", "INCOME_H", "Total_GLP1RA_OOP_BL", "Age", "Sex", "White",  "Panel_factor","max_GLP1RA_OC_days_denominator")
+
+
+GLP1RA_variable_list_cc <- c("GLP1RA_PDC_num_OC", "PDC_GLP1RA_BL", "INCOME_H", "Total_GLP1RA_OOP_BL", "Age", "Sex", "Charlson_QUAN", "Glycemic_control_numeric","ADL", "BMI" , "Risk_CVD_event" , "Education", "White", "Marital_status","CHF_factor" ,  "ASCVD" ,   "Metro_NonMet", "Region", "Current_smoking", "Panel_factor", "DM_duration_years" , "Medicare_Advantage", "Disabled","max_GLP1RA_OC_days_denominator", "Insulin_exGLP1RA", "Oral_DM_med_exGLP1RA" )
+
+SGLT2i_variable_list_simple_cc <- c("SGLT2i_PDC_num_OC", "PDC_SGLT2i_BL", "INCOME_H", "Total_SGLT2i_OOP_BL", "Age", "Sex", "White",  "Panel_factor","max_SGLT2i_OC_days_denominator")
+
+SGLT2i_variable_list_cc <- c("SGLT2i_PDC_num_OC", "PDC_SGLT2i_BL", "INCOME_H", "Total_SGLT2i_OOP_BL", "Age", "Sex", "Charlson_QUAN", "Glycemic_control_numeric","ADL", "BMI" , "Risk_CVD_event" , "Education", "White", "Marital_status","CHF_factor" ,  "ASCVD" ,  "Metro_NonMet", "Region", "Current_smoking", "Panel_factor", "DM_duration_years" , "Medicare_Advantage", "Disabled", "max_SGLT2i_OC_days_denominator", "Insulin_exSGLT2i", "Oral_DM_med_exSGLT2i")
+```
+### complete cases
+```{r}
+your_GLP1RA_population<- GLP1RA_users_with_2yr_weights_low_income
+
+GLP1RA_complete_cases_model_1<- your_GLP1RA_population[complete.cases(your_GLP1RA_population[GLP1RA_variable_list_simple_cc]), ]
+
+GLP1RA_complete_cases_model_2_3<- your_GLP1RA_population[complete.cases(your_GLP1RA_population[GLP1RA_variable_list_cc]), ]
+
+# Count the number of complete cases
+
+print("GLP1RA model 1")
+nrow(GLP1RA_complete_cases_model_1)
+
+print("GLP1RA model 2+3")
+nrow(GLP1RA_complete_cases_model_2_3)
+                                   
+#create a weighted survey object for our GLP1RA population (where the PDC numerator <= PDC denominator)
+weighted_GLP1RA_complete_cases_1 <-
+    svrepdesign( 
+    weights = ~CSL2YWGT, 
+    repweights = "CSL2Y[001-100]+" , 
+    type = "BRR", 
+    data = GLP1RA_complete_cases_model_1 ,
+    combined.weights = TRUE
+)                                        
+weighted_GLP1RA_complete_cases_2_3 <-
+    svrepdesign( 
+    weights = ~CSL2YWGT, 
+    repweights = "CSL2Y[001-100]+" , 
+    type = "BRR", 
+    data = GLP1RA_complete_cases_model_2_3 ,
+    combined.weights = TRUE
+)
+#weighted 
+print("GLP1RA model 1")
+svytotal(~dummy, design= weighted_GLP1RA_complete_cases_1, na.rm= TRUE)
+print("GLP1RA model 2+3")
+svytotal(~dummy, design= weighted_GLP1RA_complete_cases_2_3, na.rm= TRUE)
+
+your_SGLT2i_population<- SGLT2i_users_with_2yr_weights_low_income
+  
+SGLT2i_complete_cases_model_1<- your_SGLT2i_population[complete.cases(your_SGLT2i_population[SGLT2i_variable_list_simple_cc]), ]
+
+SGLT2i_complete_cases_model_2_3<- your_SGLT2i_population[complete.cases(your_SGLT2i_population[SGLT2i_variable_list_cc]), ]
+
+# Count the number of complete cases
+
+print("SGLT2i model 1")
+nrow(SGLT2i_complete_cases_model_1)
+
+print("SGLT2i model 2+3")
+nrow(SGLT2i_complete_cases_model_2_3)
+                                   
+#create a weighted survey object for our SGLT2i population (where the PDC numerator <= PDC denominator)
+weighted_SGLT2i_complete_cases_1 <-
+    svrepdesign( 
+    weights = ~CSL2YWGT, 
+    repweights = "CSL2Y[001-100]+" , 
+    type = "BRR", 
+    data = SGLT2i_complete_cases_model_1 ,
+    combined.weights = TRUE
+)                                        
+weighted_SGLT2i_complete_cases_2_3 <-
+    svrepdesign( 
+    weights = ~CSL2YWGT, 
+    repweights = "CSL2Y[001-100]+" , 
+    type = "BRR", 
+    data = SGLT2i_complete_cases_model_2_3 ,
+    combined.weights = TRUE
+)
+#weighted 
+print("SGLT2i model 1")
+svytotal(~dummy, design= weighted_SGLT2i_complete_cases_1, na.rm= TRUE)
+print("SGLT2i model 2+3")
+svytotal(~dummy, design= weighted_SGLT2i_complete_cases_2_3, na.rm= TRUE)
+```
+# AIC comparisons
+## GLP
+```{r}
+print("complex_GLP1RA_PDC")
+AIC(svyglm(complex_GLP1RA_PDC, design = weighted_GLP1RA_population_two_year_weights_low_income ,
+                        family = poisson() ))
+
+complex_GLP1RA_PDC_income_log <- as.formula(paste("GLP1RA_PDC_num_OC ~ log(PDC_GLP1RA_BL) + log(INCOME_H) + I(Total_GLP1RA_OOP_BL/100) + I(Age/10) + Sex + White + Panel_factor+ Marital_status+  Education + Region+ Metro_NonMet+ Medicare_Advantage + Disabled + I(BMI/5)  + Charlson_QUAN+ Risk_CVD_event+ ADL   +Current_smoking +  CHF_factor  + I(DM_duration_years/5) +  factor(Insulin_exGLP1RA) + factor(Oral_DM_med_exGLP1RA)+ Glycemic_control_numeric + offset(offset_var_GLP1RA)"))
+print("complex_GLP1RA_PDC_income_log")
+AIC(svyglm(complex_GLP1RA_PDC_income_log, design = weighted_GLP1RA_population_two_year_weights_low_income ,
+                        family = poisson() ))
+```
+
+## SGLT
+```{r}
+print("complex_SGLT2i_PDC")
+AIC(svyglm(complex_SGLT2i_PDC, design = weighted_SGLT2i_population_two_year_weights_low_income ,
+                        family = poisson() ))
+
+complex_SGLT2i_PDC_income_log <- as.formula(paste("SGLT2i_PDC_num_OC ~ log(PDC_SGLT2i_BL)+ log(INCOME_H) + I(Total_SGLT2i_OOP_BL/100) + I(Age/10) + Sex + White + Panel_factor+ Marital_status+  Education + Region+ Metro_NonMet+ Medicare_Advantage + Disabled + I(BMI/5)  + Charlson_QUAN+ Risk_CVD_event+ ADL   +Current_smoking +  CHF_factor  + I(DM_duration_years/5) +  factor(Insulin_exSGLT2i) + factor(Oral_DM_med_exSGLT2i)+ Glycemic_control_numeric + offset(offset_var_SGLT2i)"))
+print("complex_SGLT2i_PDC_income_log")
+AIC(svyglm(complex_SGLT2i_PDC_income_log, design = weighted_SGLT2i_population_two_year_weights_low_income ,
+                        family = poisson() ))
+```
+
+# simple model for conparison with excel output
+```{r}
+#simple model for comparison with excel output
+
+summary(svyglm(complex_SGLT2i_PDC, design = weighted_SGLT2i_population_two_year_weights_low_income ,
+                        family = poisson() ))
+```
+
+# Running the Poisson models that export to excel
+## GLP1RA Model 
+### PDC
+```{r}
+fit_and_export_poisson_excel <- function(design_list, formula_list, output_excel_file) {
+  wb <- createWorkbook()
+
+  for (i in seq_along(design_list)) {
+    design <- design_list[[i]]
+    
+    for (j in seq_along(formula_list)) {
+      formula <- formula_list[[j]]
+      
+
+      # Fit the Poisson regression model
+      poisson_model <- svyglm(formula = formula, design = design, family = quasipoisson())
+
+      # Extract the coefficients, p-values, and t-values
+      coefficients_summary <- summary(poisson_model, correlation = TRUE)
+
+      # Create a data frame with coefficients, p-values, and t-values
+      coefficients_df <- data.frame(
+        Variable = rownames(coefficients_summary$coefficients),
+        Coefficient = coefficients_summary$coefficients[, "Estimate"],
+        Lower_CI = confint(poisson_model)[, "2.5 %"],  # Lower 95% CI
+        Upper_CI = confint(poisson_model)[, "97.5 %"],  # Upper 95% CI
+        Exp_Coefficient = exp(coefficients_summary$coefficients[, "Estimate"]),
+        Exp_Lower_CI = exp(confint(poisson_model)[, "2.5 %"]),  # Lower 95% CI
+        Exp_Upper_CI = exp(confint(poisson_model)[, "97.5 %"]),  # Upper 95% CI
+        P_Value = coefficients_summary$coefficients[, "Pr(>|t|)"],
+        T_Value = coefficients_summary$coefficients[, "t value"]
+      )
+       # Round the exponential values to three decimal places for formatting
+      coefficients_df <- coefficients_df %>%
+        mutate(
+          Rounded_Exp_Coefficient = round(Exp_Coefficient, 3),
+          Rounded_Exp_Lower_CI = round(Exp_Lower_CI, 3),
+          Rounded_Exp_Upper_CI = round(Exp_Upper_CI, 3)
+        )
+
+      # Create the new column with the specified format
+      coefficients_df$Formatted_Column <- 
+        paste(coefficients_df$Rounded_Exp_Coefficient, " (", 
+              coefficients_df$Rounded_Exp_Lower_CI, "-", 
+              coefficients_df$Rounded_Exp_Upper_CI, ")", sep = "")
+      
+      # Remove the rounded columns
+      coefficients_df <- coefficients_df[, !(names(coefficients_df) %in% c("Rounded_Exp_Coefficient", "Rounded_Exp_Lower_CI", "Rounded_Exp_Upper_CI"))]
+
+      
+      # Create a new sheet in the Excel workbook for each combination of model and formula
+sheet_name <- paste("Design", i, "_Formula", j)
+      addWorksheet(wb, sheetName = sheet_name)
+
+      # Write the coefficients to the sheet
+      writeData(wb, sheet = sheet_name, coefficients_df, startCol = 1, startRow = 1)
+    }
+  }
+
+  # Save the workbook to an Excel file
+  saveWorkbook(wb, file = output_excel_file)
+    
+}
+
+# Example usage
+design1 <- weighted_GLP1RA_population_two_year_weights_low_income
+design2<- weighted_GLP1RA_population_two_year_weights_high_income
+
+formula1 <- simple_GLP1RA_PDC
+formula2 <- complex_GLP1RA_PDC
+formula3 <- complex_GLP1RA_PDC_int
+forumla4<- complex_GLP1RA_PDC_Medicaid
+formula5 <-complex_GLP1RA_PDC_Medicaid_OOP
+
+output_excel_file <- paste0("H:/Poisson_Model_Coefficients/","GLP1RA_PDC_Poisson", ".xlsx")
+
+if (file.exists(output_excel_file)) { # better to overwrite the file each time or to increase it with a counter?
+  file.remove(output_excel_file)
+}
+fit_and_export_poisson_excel(
+  design_list = list(design1, design2),
+  formula_list = list(formula1, formula2, formula3, forumla4, formula5),
+  output_excel_file = output_excel_file
+)
+```
+
+### Linear
+```{r}
+fit_and_export_linear_excel <- function(design_list, formula_list, output_excel_file) {
+  wb <- createWorkbook()
+
+  for (i in seq_along(design_list)) {
+    design <- design_list[[i]]
+    
+    for (j in seq_along(formula_list)) {
+      formula <- formula_list[[j]]
+      
+
+      # Fit the Gaussian regression model
+      gaussian_model <- svyglm(formula = formula, design = design, family = gaussian())
+
+      # Extract the coefficients, p-values, and t-values
+      coefficients_summary <- summary(gaussian_model, correlation = TRUE)
+
+      # Create a data frame with coefficients, p-values, and t-values
+      coefficients_df <- data.frame(
+        Variable = rownames(coefficients_summary$coefficients),
+        Coefficient = coefficients_summary$coefficients[, "Estimate"],
+        Lower_CI = confint(gaussian_model)[, "2.5 %"],  # Lower 95% CI
+        Upper_CI = confint(gaussian_model)[, "97.5 %"],  # Upper 95% CI
+        P_Value = coefficients_summary$coefficients[, "Pr(>|t|)"],
+        T_Value = coefficients_summary$coefficients[, "t value"]
+      )
+       # Round the exponential values to three decimal places for formatting
+      coefficients_df <- coefficients_df %>%
+        mutate(
+          Rounded_Coefficient = round(Coefficient, 3),
+          Rounded_Lower_CI = round(Lower_CI, 3),
+          Rounded_Upper_CI = round(Upper_CI, 3)
+        )
+
+      # Create the new column with the specified format
+      coefficients_df$Formatted_Column <- 
+        paste(coefficients_df$Rounded_Coefficient, " (", 
+              coefficients_df$Rounded_Lower_CI, "-", 
+              coefficients_df$Rounded_Upper_CI, ")", sep = "")
+      
+      # Remove the rounded columns
+      coefficients_df <- coefficients_df[, !(names(coefficients_df) %in% c("Rounded_Exp_Coefficient", "Rounded_Exp_Lower_CI", "Rounded_Exp_Upper_CI"))]
+
+      
+      # Create a new sheet in the Excel workbook for each combination of model and formula
+sheet_name <- paste("Design", i, "_Formula", j)
+      addWorksheet(wb, sheetName = sheet_name)
+
+      # Write the coefficients to the sheet
+      writeData(wb, sheet = sheet_name, coefficients_df, startCol = 1, startRow = 1)
+    }
+  }
+
+  # Save the workbook to an Excel file
+  saveWorkbook(wb, file = output_excel_file)
+    
+}
+
+# Example usage
+design1 <- weighted_GLP1RA_population_two_year_weights_low_income
+
+formula1 <- simple_GLP1RA_PDC_linear
+formula2 <- complex_GLP1RA_PDC_linear
+formula3 <- complex_GLP1RA_PDC_int_linear
+formula4<- complex_GLP1RA_PDC_Medicaid_linear
+formula5 <-complex_GLP1RA_PDC_Medicaid_OOP_linear
+
+output_excel_file <- paste0("H:/Linear_Model_Coefficients/","GLP1RA_PDC_linear", ".xlsx")
+
+if (file.exists(output_excel_file)) { # better to overwrite the file each time or to increase it with a counter?
+  file.remove(output_excel_file)
+}
+fit_and_export_linear_excel(
+  design_list = list(design1),
+  formula_list = list(formula1, formula2, formula3, formula4, formula5),
+  output_excel_file = output_excel_file
+)
+```
+
+## SGLT2i Model 
+### PDC
+```{r}
+fit_and_export_poisson_excel <- function(design_list, formula_list, output_excel_file) {
+  wb <- createWorkbook()
+
+  for (i in seq_along(design_list)) {
+    design <- design_list[[i]]
+    
+    for (j in seq_along(formula_list)) {
+      formula <- formula_list[[j]]
+      
+
+   
+      # Fit the Poisson regression model
+      poisson_model <- svyglm(formula = formula, design = design, family = quasipoisson())
+
+      # Extract the coefficients, p-values, and t-values
+      coefficients_summary <- summary(poisson_model, correlation = TRUE)
+
+      # Create a data frame with coefficients, p-values, and t-values
+      coefficients_df <- data.frame(
+        Variable = rownames(coefficients_summary$coefficients),
+        Coefficient = coefficients_summary$coefficients[, "Estimate"],
+        Lower_CI = confint(poisson_model)[, "2.5 %"],  # Lower 95% CI
+        Upper_CI = confint(poisson_model)[, "97.5 %"],  # Upper 95% CI
+        Exp_Coefficient = exp(coefficients_summary$coefficients[, "Estimate"]),
+        Exp_Lower_CI = exp(confint(poisson_model)[, "2.5 %"]),  # Lower 95% CI
+        Exp_Upper_CI = exp(confint(poisson_model)[, "97.5 %"]),  # Upper 95% CI
+        P_Value = coefficients_summary$coefficients[, "Pr(>|t|)"],
+        T_Value = coefficients_summary$coefficients[, "t value"]
+      )
+
+          # Round the exponential values to three decimal places for formatting
+      coefficients_df <- coefficients_df %>%
+        mutate(
+          Rounded_Exp_Coefficient = round(Exp_Coefficient, 3),
+          Rounded_Exp_Lower_CI = round(Exp_Lower_CI, 3),
+          Rounded_Exp_Upper_CI = round(Exp_Upper_CI, 3)
+        )
+
+      # Create the new column with the specified format
+      coefficients_df$Formatted_Column <- 
+        paste(coefficients_df$Rounded_Exp_Coefficient, " (", 
+              coefficients_df$Rounded_Exp_Lower_CI, "-", 
+              coefficients_df$Rounded_Exp_Upper_CI, ")", sep = "")
+      
+      # Remove the rounded columns
+      coefficients_df <- coefficients_df[, !(names(coefficients_df) %in% c("Rounded_Exp_Coefficient", "Rounded_Exp_Lower_CI", "Rounded_Exp_Upper_CI"))]
+
+      # Create a new sheet in the Excel workbook for each combination of model and formula
+sheet_name <- paste("Design", i, "_Formula", j)
+      addWorksheet(wb, sheetName = sheet_name)
+
+      # Write the coefficients to the sheet
+      writeData(wb, sheet = sheet_name, coefficients_df, startCol = 1, startRow = 1)
+    }
+  }
+
+  # Save the workbook to an Excel file
+  saveWorkbook(wb, file = output_excel_file)
+  
+
+}
+
+# Example usage
+design1 <- weighted_SGLT2i_population_two_year_weights_low_income
+design2<- weighted_SGLT2i_population_two_year_weights_high_income
+
+formula1 <- simple_SGLT2i_PDC
+formula2 <- complex_SGLT2i_PDC
+formula3 <- complex_SGLT2i_PDC_int
+formula4<- complex_SGLT2i_PDC_Medicaid
+formula5 <- complex_SGLT2i_PDC_Medicaid_OOP
+
+output_excel_file <- paste0("H:/Poisson_Model_Coefficients/","SGLT2i_PDC_Poisson", ".xlsx")
+
+if (file.exists(output_excel_file)) { # better to overwrite the file each time or to increase it with a counter?
+  file.remove(output_excel_file)
+}
+fit_and_export_poisson_excel(
+  design_list = list(design1, design2),
+  formula_list = list(formula1, formula2, formula3, formula4, formula5),
+  output_excel_file = output_excel_file
+)
+
+```
+
+### Linear
+```{r}
+fit_and_export_linear_excel <- function(design_list, formula_list, output_excel_file) {
+  wb <- createWorkbook()
+
+  for (i in seq_along(design_list)) {
+    design <- design_list[[i]]
+    
+    for (j in seq_along(formula_list)) {
+      formula <- formula_list[[j]]
+      
+
+      # Fit the Gaussian regression model
+      gaussian_model <- svyglm(formula = formula, design = design, family = gaussian())
+
+      # Extract the coefficients, p-values, and t-values
+      coefficients_summary <- summary(gaussian_model, correlation = TRUE)
+
+      # Create a data frame with coefficients, p-values, and t-values
+      coefficients_df <- data.frame(
+        Variable = rownames(coefficients_summary$coefficients),
+        Coefficient = coefficients_summary$coefficients[, "Estimate"],
+        Lower_CI = confint(gaussian_model)[, "2.5 %"],  # Lower 95% CI
+        Upper_CI = confint(gaussian_model)[, "97.5 %"],  # Upper 95% CI
+        P_Value = coefficients_summary$coefficients[, "Pr(>|t|)"],
+        T_Value = coefficients_summary$coefficients[, "t value"]
+      )
+       # Round the exponential values to three decimal places for formatting
+      coefficients_df <- coefficients_df %>%
+        mutate(
+          Rounded_Coefficient = round(Coefficient, 3),
+          Rounded_Lower_CI = round(Lower_CI, 3),
+          Rounded_Upper_CI = round(Upper_CI, 3)
+        )
+
+      # Create the new column with the specified format
+      coefficients_df$Formatted_Column <- 
+        paste(coefficients_df$Rounded_Coefficient, " (", 
+              coefficients_df$Rounded_Lower_CI, "-", 
+              coefficients_df$Rounded_Upper_CI, ")", sep = "")
+      
+      
+      # Remove the rounded columns
+      coefficients_df <- coefficients_df[, !(names(coefficients_df) %in% c("Rounded_Exp_Coefficient", "Rounded_Exp_Lower_CI", "Rounded_Exp_Upper_CI"))]
+
+      
+      # Create a new sheet in the Excel workbook for each combination of model and formula
+sheet_name <- paste("Design", i, "_Formula", j)
+      addWorksheet(wb, sheetName = sheet_name)
+
+      # Write the coefficients to the sheet
+      writeData(wb, sheet = sheet_name, coefficients_df, startCol = 1, startRow = 1)
+    }
+  }
+
+  # Save the workbook to an Excel file
+  saveWorkbook(wb, file = output_excel_file)
+    
+}
+
+# Example usage
+design1 <- weighted_SGLT2i_population_two_year_weights_low_income
+
+formula1 <- simple_SGLT2i_PDC_linear
+formula2 <- complex_SGLT2i_PDC_linear
+formula3 <- complex_SGLT2i_PDC_int_linear
+formula4<- complex_SGLT2i_PDC_Medicaid_linear
+formula5 <-complex_SGLT2i_PDC_Medicaid_OOP_linear
+
+output_excel_file <- paste0("H:/Linear_Model_Coefficients/","SGLT2i_PDC_linear", ".xlsx")
+
+if (file.exists(output_excel_file)) { # better to overwrite the file each time or to increase it with a counter?
+  file.remove(output_excel_file)
+}
+fit_and_export_linear_excel(
+  design_list = list(design1),
+  formula_list = list(formula1, formula2, formula3, formula4, formula5),
+  output_excel_file = output_excel_file
+)
+```
+
+## Extract the coefficients for OOP, Income and Interaction
+```{r}
+file_path <- "H:/Poisson_Model_Coefficients/GLP1RA_PDC_continuous.xlsx"
+
+# Load the workbook using read.xlsx
+wb <- loadWorkbook(file_path)
+sheets <- names(wb)
+
+# Extract a specific coefficient from the first sheet
+desired_sheet <- sheets[8]
+desired_variable <- "I(INCOME_H/10000)"  # specify the variable you are interested in
+
+coefficients_df <- read.xlsx(file_path, sheet = desired_sheet)
+
+# Extract the specific coefficient
+
+GLP1RA_income_coefficient <- coefficients_df$Coefficient[coefficients_df$Variable == "I(INCOME_H/10000)"]
+
+# Extract the coefficients for OOP and Interaction
+GLP1RA_oop_coefficient <- coefficients_df$Coefficient[coefficients_df$Variable == "I(Total_GLP1RA_OOP_BL/100)"]
+
+GLP1RA_interaction_coefficient <- coefficients_df$Coefficient[coefficients_df$Variable == "I(INCOME_H/10000):I(Total_GLP1RA_OOP_BL/100)"]
+
+# Print the result
+print(paste("Income Coefficient:", GLP1RA_income_coefficient))
+print(paste("OOP Coefficient:", GLP1RA_oop_coefficient))
+print(paste("Interaction Coefficient:", GLP1RA_interaction_coefficient))
+```
+
+```{r}
+file_path <- "H:/Poisson_Model_Coefficients/SGLT2i_PDC_continuous.xlsx"
+
+# Load the workbook using read.xlsx
+wb <- loadWorkbook(file_path)
+sheets <- names(wb)
+
+# Extract a specific coefficient from the first sheet
+desired_sheet <- sheets[2]
+desired_variable <- "I(INCOME_H/10000)"  # specify the variable you are interested in
+
+coefficients_df <- read.xlsx(file_path, sheet = desired_sheet)
+
+# Extract the specific coefficient
+
+SGLT2i_income_coefficient <- coefficients_df$Coefficient[coefficients_df$Variable == "I(INCOME_H/10000)"]
+
+# Extract the coefficients for OOP and Interaction
+SGLT2i_oop_coefficient <- coefficients_df$Coefficient[coefficients_df$Variable == "I(Total_SGLT2i_OOP_BL/100)"]
+
+# Print the result
+print(paste("Income Coefficient:", SGLT2i_income_coefficient))
+print(paste("OOP Coefficient:", SGLT2i_oop_coefficient))
+```
+
+# Create 2D figures + Heat maps
+## GLP1RA Create 3D figures
+```{r}
+# Create data frame with income and OOP values
+oop_values <-  c(0, 500, 1000, 1500,2000,2500)
+income_values <- c(40000, 60000, 80000, 100000, 120000, 140000)
+# Create all possible combinations of income and OOP values
+GLP1RA_income_oop_combinations <- expand.grid(Income = income_values, OOP = oop_values)
+
+# Coefficients
+income_coefficient <- GLP1RA_income_coefficient
+oop_coefficient <- GLP1RA_oop_coefficient
+interaction_coefficient <- GLP1RA_interaction_coefficient
+
+# Calculate columns 3 and 4
+GLP1RA_income_oop_combinations$Log_ratio <- (GLP1RA_income_oop_combinations$Income / 10000) * income_coefficient +
+                             (GLP1RA_income_oop_combinations$OOP / 100) * oop_coefficient +
+                             (GLP1RA_income_oop_combinations$Income / 10000) * (GLP1RA_income_oop_combinations$OOP / 100) * interaction_coefficient
+
+GLP1RA_income_oop_combinations$Rate_ratio <- exp(GLP1RA_income_oop_combinations$Log_ratio)
+
+# Print the resulting data frame
+print(GLP1RA_income_oop_combinations)
+```
+###  Rate ratio
+```{r}
+GLP1RA_income_oop_combinations$Income<-factor(GLP1RA_income_oop_combinations$Income)
+GLP1RA_income_oop_combinations$OOP<-factor(GLP1RA_income_oop_combinations$OOP)
+```
+
+## SGLT2i Create 2D figures
+```{r}
+# Create data frame with income and OOP values
+oop_values <- c(0,200, 400, 600, 800, 1000)
+
+# Create all possible combinations of income and OOP values
+SGLT2i_income_oop_combinations <- expand.grid( OOP = oop_values)
+
+
+# Coefficients
+income_coefficient <- SGLT2i_income_coefficient
+oop_coefficient <- SGLT2i_oop_coefficient
+
+# Calculate columns 3 and 4
+SGLT2i_income_oop_combinations$Log_ratio <- 
+                             (SGLT2i_income_oop_combinations$OOP / 100) * oop_coefficient 
+
+SGLT2i_income_oop_combinations$Rate_ratio <- exp(SGLT2i_income_oop_combinations$Log_ratio)
+
+# Print the resulting data frame
+print(SGLT2i_income_oop_combinations)
+```
+###  Rate ratio
+```{r}
+#SGLT2i w/o outliers 
+SGLT2i_income_oop_combinations$OOP<-factor(SGLT2i_income_oop_combinations$OOP)
+```
+
+## Mean Predicted Ahderence
+### GLP1RA
+```{r}
+#1.	Set the variables OOP and income in the entire dataset (GLP1RA datasets) to take on the values from each row of the matrix that you used for the 3D figure. Define mock dataset as original dataset so that you can change values of variables without messing with original datasets.
+mock_GLP1RA_users_with_2yr_weights<-GLP1RA_users_with_2yr_weights_high_income
+GLP1RA_dataframes <- list()
+GLP1RA_weighted<- list()
+GLP1RA_predicted_adherence<- list()
+
+mock_GLP1RA_users_with_2yr_weights$Income<- mock_GLP1RA_users_with_2yr_weights$INCOME_H
+mock_GLP1RA_users_with_2yr_weights$OOP<- mock_GLP1RA_users_with_2yr_weights$Total_GLP1RA_OOP_BL 
+
+summary(mock_GLP1RA_users_with_2yr_weights$Income)
+summary(mock_GLP1RA_users_with_2yr_weights$OOP)
+```
+
+```{r}
+mean_predicted_adherence_df <- data.frame(
+  OOP = numeric(nrow(GLP1RA_income_oop_combinations)),
+  Income = numeric(nrow(GLP1RA_income_oop_combinations)),
+  MeanPredictedAdherence = numeric(nrow(GLP1RA_income_oop_combinations))
+)
+#run the Poissson
+fit_complex_GLP1RA_int<- svyglm(complex_GLP1RA_PDC_int, design = weighted_GLP1RA_population_two_year_weights_high_income ,
+                        family = poisson() )
+
+GLP1RA_variable_list_3 <- c("GLP1RA_PDC_num_OC", "PDC_GLP1RA_BL", "INCOME_H", "Total_GLP1RA_OOP_BL", "Age", "Sex", "Charlson_QUAN", "Glycemic_control_numeric","ADL", "BMI" , "Risk_CVD_event" , "Education", "White", "Marital_status","CHF_factor" ,  "ASCVD" , "Metro_NonMet", "Region", "Current_smoking", "Panel_factor", "DM_duration_years" , "Medicare_Advantage", "Disabled", "offset_var_GLP1RA", "Insulin_exGLP1RA", "Oral_DM_med_exGLP1RA" )
+
+GLP1RA_income_oop_combinations$MeanPredictedAdherence=NA
+
+mock_GLP1RA_users_with_2yr_weights$offset_var_GLP1RA<- 365.25 #set this up like we did before
+```
+
+```{r}
+fit_simple_GLP1RA<- svyglm(simple_GLP1RA_PDC, design = weighted_GLP1RA_population_two_year_weights_high_income ,
+                        family = poisson() )
+mean(predict(fit_simple_GLP1RA, type = "response", na.action=na.exclude))
+
+mean(GLP1RA_users_with_2yr_weights$Final_GLP1RA_Supply_OC /365.25)
+```
+
+```{r}     
+PredictedAdherence <-predict(fit_complex_GLP1RA_int, type = "response", newdata = mock_GLP1RA_users_with_2yr_weights, na.action=na.exclude)
+
+mock_GLP1RA_users_with_2yr_weights$PredictedAdherence=NA
+mock_GLP1RA_users_with_2yr_weights[complete.cases(mock_GLP1RA_users_with_2yr_weights[GLP1RA_variable_list_3]),"PredictedAdherence"]=as.numeric(PredictedAdherence)
+     
+  weighted_obj <- svrepdesign(
+    weights = ~CSL2YWGT,
+    repweights = "CSL2Y[001-100]+",
+    type = "BRR",
+    data = mock_GLP1RA_users_with_2yr_weights,
+    combined.weights = TRUE
+  )
+  
+  
+      # Calculate the mean predicted adherence using svymean
+ GLP1RA_mean_predicted_adherence<-svymean(~PredictedAdherence, design = weighted_obj, na.rm=TRUE)
+ GLP1RA_mean_predicted_adherence[1]
+ confint(GLP1RA_mean_predicted_adherence)
+```
+
+```{r}
+# Loop through each row of GLP1RA_income_oop_combinations
+for (i in 1:nrow(GLP1RA_income_oop_combinations)) {
+  
+  # Create a copy of mock_GLP1RA_users_with_2yr_weights...not needed
+  GLP1RA_df <- mock_GLP1RA_users_with_2yr_weights
+  
+  # Replace income and OOP in the new_df with values from GLP1RA_income_oop_combinations
+  GLP1RA_df$INCOME_H <- as.numeric(as.character(GLP1RA_income_oop_combinations$Income[i]))
+GLP1RA_df$Total_GLP1RA_OOP_BL <- as.numeric(as.character(GLP1RA_income_oop_combinations$OOP[i]))
+  
+  
+  # Create a weighted object for each new dataframe with a unique name
+
+     
+PredictedAdherence <-predict(fit_complex_GLP1RA_int, type = "response", newdata = GLP1RA_df, na.action=na.exclude)
+
+GLP1RA_df$PredictedAdherence=NA
+GLP1RA_df[complete.cases(GLP1RA_df[GLP1RA_variable_list_3]),"PredictedAdherence"]=as.numeric(PredictedAdherence)
+     
+  weighted_obj <- svrepdesign(
+    weights = ~CSL2YWGT,
+    repweights = "CSL2Y[001-100]+",
+    type = "BRR",
+    data = GLP1RA_df,
+    combined.weights = TRUE
+  )
+  #3.	Use the predict function with data = mock dataset, and type = “response” to generate predicted 1-year adherence for each subject. 
+  
+      # Calculate the mean predicted adherence using svymean
+ GLP1RA_income_oop_combinations$MeanPredictedAdherence[i] <- svymean(~PredictedAdherence, design = weighted_obj, na.rm=TRUE)[1]
+  
+  
+  cat(paste(i, "")); flush.console()
+}
+```
+
+```{r}
+p <- ggplot(GLP1RA_income_oop_combinations, aes(x = Income , y = OOP, fill = MeanPredictedAdherence)) +
+  geom_tile(color = "black", linewidth = 0.3) + 
+  labs(x = "Income ($)" ,
+       y = "Total out-of-pocket cost ($)",
+       fill = "Adherence") + 
+  coord_fixed() + theme_bw() +
+  theme(
+ panel.border = element_blank(),  # Remove panel border
+        panel.grid.major = element_blank(),  # Remove major grid lines
+        panel.grid.minor = element_blank(),  # Remove minor grid lines
+        axis.line = element_blank(),
+    axis.title.x = element_text(size = 24),
+    axis.title.y = element_text(size = 24),
+    axis.text.x = element_text(size = 24),  # Increase size of x-axis text
+    axis.text.y = element_text(size = 24),
+    legend.title = element_text(size = 24, margin = margin(b = 10)),
+    legend.text = element_text(size =24),
+    plot.title = element_text(hjust = 0.5, size = 24, face = "bold")  # Centering the title
+  ) + 
+  guides(fill = guide_colourbar(barwidth = 2,
+                                barheight = 25))
+#+ scale_fill_gradient2(low = "#df8f44",
+ #                   mid = "#00a1d5",
+  #                   high = "#b24745")
+
+GLP1RA_contin_heat <-p +  scale_fill_viridis(option="magma",  limits = c(0.40, 1),
+                  breaks = seq(0.40, 1, length.out = 7))
+GLP1RA_contin_heat
+```
+
+```{r}
+setwd("H:/MCBS_figures")
+# Combine the plots with a shared legend
+pdf("GLP1RA_contin_OOP.pdf", width = 20, height = 10)
+
+# Plot the GLP1RA_contin_heat with the legend on the right
+GLP1RA_contin_heat + theme(legend.position = "right")
+
+dev.off()
+```
+
+```{r}
+setwd("H:/MCBS_figures")
+# Combine the plots with a shared legend
+# need to adjust size 
+tiff("GLP1RA_contin_OOP.tiff")
+
+# Plot the GLP1RA_contin_heat with the legend on the right
+GLP1RA_contin_heat + theme(legend.position = "right")
+
+dev.off()
+```
+
+###SGLT2i
+```{r}
+#1.	Set the variables OOP and income in the entire dataset (SGLT2i2i and SGLT2i-1RA datasets) to take on the values from each row of the matrix that you used for the 3D figure. Define mock dataset as original dataset so that you can change values of variables without messing with original datasets.
+mock_SGLT2i_users_with_2yr_weights<-SGLT2i_users_with_2yr_weights_low_income
+SGLT2i_dataframes <- list()
+SGLT2i_weighted<- list()
+SGLT2i_predicted_adherence<- list()
+
+mock_SGLT2i_users_with_2yr_weights$OOP<- mock_SGLT2i_users_with_2yr_weights$Total_SGLT2i_OOP_BL 
+summary(mock_SGLT2i_users_with_2yr_weights$OOP)
+```
+
+```{r}
+mean_predicted_adherence_df <- data.frame(
+  OOP = numeric(nrow(SGLT2i_income_oop_combinations)),
+  MeanPredictedAdherence = numeric(nrow(SGLT2i_income_oop_combinations))
+)
+#run the poissson
+fit_complex_SGLT2i<- svyglm(complex_SGLT2i_PDC, design = weighted_SGLT2i_population_two_year_weights_low_income ,
+                        family = poisson() )
+
+SGLT2i_variable_list_3 <- c("SGLT2i_PDC_num_OC", "PDC_SGLT2i_BL", "INCOME_H", "Total_SGLT2i_OOP_BL", "Age", "Sex", "Charlson_QUAN", "Glycemic_control_numeric","ADL", "BMI" , "Risk_CVD_event" , "Education", "White", "Marital_status","CHF_factor" ,  "ASCVD" , "Metro_NonMet", "Region", "Current_smoking", "Panel_factor", "DM_duration_years" , "Medicare_Advantage", "Disabled", "offset_var_SGLT2i", "Insulin_exSGLT2i", "Oral_DM_med_exSGLT2i" )
+
+SGLT2i_income_oop_combinations$MeanPredictedAdherence=NA
+
+mock_SGLT2i_users_with_2yr_weights$offset_var_SGLT2i<- 365.25 #set this up like we did before
+```
+
+```{r}
+fit_simple_SGLT2i<- svyglm(simple_SGLT2i_PDC, design = weighted_SGLT2i_population_two_year_weights_low_income ,
+                        family = poisson() )
+mean(predict(fit_simple_SGLT2i, type = "response", na.action=na.exclude))
+
+mean(SGLT2i_users_with_2yr_weights$Final_SGLT2i_Supply_OC /365.25)
+mean(SGLT2i_users_with_2yr_weights$PDC_SGLT2i_BL)
+```
+
+```{r}     
+PredictedAdherence <-predict(fit_complex_SGLT2i , type = "response", newdata = mock_SGLT2i_users_with_2yr_weights, na.action=na.exclude)
+```
+
+```{r}
+mock_SGLT2i_users_with_2yr_weights$PredictedAdherence=NA
+mock_SGLT2i_users_with_2yr_weights[complete.cases(mock_SGLT2i_users_with_2yr_weights[SGLT2i_variable_list_3]),"PredictedAdherence"]=as.numeric(PredictedAdherence)
+     
+  weighted_obj <- svrepdesign(
+    weights = ~CSL2YWGT,
+    repweights = "CSL2Y[001-100]+",
+    type = "BRR",
+    data = mock_SGLT2i_users_with_2yr_weights,
+    combined.weights = TRUE
+  )
+      # Calculate the mean predicted adherence using svymean
+ SGLT2i_mean_predicted_adherence<-svymean(~PredictedAdherence, design = weighted_obj, na.rm=TRUE)
+ SGLT2i_mean_predicted_adherence[1]
+ confint(SGLT2i_mean_predicted_adherence)
+```
+
+```{r}
+# Loop through each row of SGLT2i_income_oop_combinations
+for (i in 1:nrow(SGLT2i_income_oop_combinations)) {
+  
+  # Create a copy of mock_SGLT2i_users_with_2yr_weights...not needed
+  SGLT2i_df <- mock_SGLT2i_users_with_2yr_weights
+  
+  # Replace income and OOP in the new_df with values from SGLT2i_income_oop_combinations
+SGLT2i_df$Total_SGLT2i_OOP_BL <- as.numeric(as.character(SGLT2i_income_oop_combinations$OOP[i]))
+  # Create a weighted object for each new dataframe with a unique name
+PredictedAdherence <-predict(fit_complex_SGLT2i , type = "response", newdata = SGLT2i_df, na.action=na.exclude)
+
+SGLT2i_df$PredictedAdherence=NA
+SGLT2i_df[complete.cases(SGLT2i_df[SGLT2i_variable_list_3]),"PredictedAdherence"]=as.numeric(PredictedAdherence)
+     
+  weighted_obj <- svrepdesign(
+    weights = ~CSL2YWGT,
+    repweights = "CSL2Y[001-100]+",
+    type = "BRR",
+    data = SGLT2i_df,
+    combined.weights = TRUE
+  )
+  #3.	Use the predict function with data = mock dataset, and type = “response” to generate predicted 1-year adherence for each subject. 
+  
+      # Calculate the mean predicted adherence using svymean
+ SGLT2i_income_oop_combinations$MeanPredictedAdherence[i] <- svymean(~PredictedAdherence, design = weighted_obj, na.rm=TRUE)[1]
+  
+  
+  cat(paste(i, "")); flush.console()
+}
+```
+
+```{r}
+SGLT_2D <- ggplot(SGLT2i_income_oop_combinations, aes(x = OOP, y = MeanPredictedAdherence, group=1)) +
+  geom_col(color = "#51127c", fill = "#51127c", width =.5 ) +  
+  labs(x = "Total out-of-pocket cost ($)",
+       y = "Predicted adherence") + 
+  theme_bw() +
+  theme(
+    #panel.border = element_blank(),  # Remove panel border
+    panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(),  # Remove minor grid lines
+    axis.line = element_blank(),
+    axis.title.x = element_text(size = 24),
+    axis.title.y = element_text(size = 24),
+    axis.text.x = element_text(size = 24),  # Increase size of x-axis text
+    axis.text.y = element_text(size = 24),
+    legend.title = element_text(size = 24, margin = margin(b = 10)),
+    legend.text = element_text(size = 24),
+    plot.title = element_text(hjust = 0.5, size = 24, face = "bold"),
+     plot.margin = margin(t = 20, r = 20, b = 20, l = 20)  # Adjust plot margins
+  ) +scale_y_continuous(expand = c(0.0, 0.00), limits = c(0, 1), breaks = seq(0, 1, by = 0.1)) +
+  scale_x_discrete(expand = c(0.0, 0.0))
+   
+# Adjust the limits and breaks as needed
+
+SGLT_2D
+```
+
+```{r}
+setwd("H:/MCBS_figures")
+# Combine the plots with a shared legend
+pdf("SGLT_2D.pdf", width = 10, height = 10)
+
+# Plot the SGLT2i_contin_heat with the legend on the right
+SGLT_2D + theme(legend.position = "right")
+
+dev.off()
+```
+
+```{r}
+setwd("H:/MCBS_figures")
+# Combine the plots with a shared legend
+tiff("SGLT_2D.tiff")
+
+# Plot the SGLT2i_contin_heat with the legend on the right
+SGLT_2D + theme(legend.position = "right")
+
+dev.off()
+```
+
+```{r}
+knitr::purl("MCBS_analysis_1-13-25-manuscript_file_short.rmd")
+```
