@@ -13,7 +13,7 @@ We analyzed these cohorts independently and subdivided them by baseline income b
 
  
 ## Acknowledgements
-Datasets used in this study can be obtained from the Centers for Medicare and Medicaid Services as Limited Data Set (LDS) files under a data use agreement.  
+MCBS datasets can be obtained from the Centers for Medicare and Medicaid Services as Limited Data Set (LDS) files under a data use agreement.  
 
 Research reported in this repository was supported by the National Heart, Lung, And Blood Institute (NHLBI) of the National Institutes of Health under award number: R01HL153456. The content is solely the responsibility of the authors and does not necessarily represent the official views of the National Institutes of Health.
 
