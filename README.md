@@ -7,7 +7,9 @@ We combined data from five longitudinally weighted two-year panels of beneficiar
 We analyzed these cohorts independently and subdivided them by baseline income below 200% of the Federal Poverty Level. We used survey-weighted generalized Poisson regression to assess the association of Beneficiaries out-pocket-costs for target drugs classes and income with adherence, adjusting for patient characteristics and other diabetes medication use. 
 
 ## References
-1. CMS. Medicare Current Beneficiary Survey (MCBS) [Internet]. CMS. [cited 2025 Jan 15]. Available from: https://www.cms.gov/data-research/research/medicare-current-beneficiary-survey 
+1. CMS. Medicare Current Beneficiary Survey (MCBS) [Internet]. CMS. [cited 2025 Jan 15]. Available from: https://www.cms.gov/data-research/research/medicare-current-beneficiary-survey
+   
+3. Klepser NS, Weber ES, Li L, Fleischmann KE, Masharani U, Park M, Max WB, Yeboah J, Hunink MG, Ferket BS. Adherence to GLP-1 receptor agonists and SGLT2 inhibitors by out-of-pocket spending among Medicare beneficiaries with diabetes. Diabetes, Obesity and Metabolism. 2025 Jul 16. doi: 10.1111/dom.16619. 
 
  
 ## Acknowledgements
